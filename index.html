@@ -195,7 +195,7 @@ function numericAt(hourly,key,index){
 function modelTimeMilliseconds(value){
  if(typeof value==='number')return value*1000;
  const text=String(value??'');
- const hasZone=/(Z|[+-]\\d{2}:?\\d{2})$/i.test(text);
+ const hasZone=/(Z|[+-]\d{2}:?\d{2})$/i.test(text);
  return new Date(hasZone?text:text+'Z').getTime();
 }
 function evaluateModelPoint(row,horizonHours,targetLeadHours,windPressure){
