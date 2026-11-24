@@ -487,9 +487,13 @@ function createAiCanvasLayer(kind,pane){
 }
 function drawAiLayers(grid,meta){
  aiGridMeta=meta;
+ const latStep=Math.abs(meta.north-meta.south)/Math.max(1,meta.rows-1);
+ const lonStep=Math.abs(meta.east-meta.west)/Math.max(1,meta.cols-1);
  grid.forEach(item=>{
   const a=item.mapCatIndex,b=item.mapConvectiveIndex;
   item.combinedIndex=a==null?b:b==null?a:Math.max(a,b);
+  const cos=Math.max(0.15,Math.cos(item.point.lat*Math.PI/180));
+  item.radiusM=Math.max(30000,Math.min(450000,111320*0.42*Math.max(latStep,lonStep*cos)));
  });
  [aiCompositeCanvasLayer,aiCatCanvasLayer,aiConvectiveCanvasLayer,
   aiWindCanvasLayer,aiContourCanvasLayer,aiFlowCanvasLayer]
@@ -870,19 +874,26 @@ function renderAiCesiumLayers(){
  aiCesiumEntities.forEach(entity=>cesiumViewer.entities.remove(entity));
  aiCesiumEntities=[];
  aiGridResults.forEach(item=>{
-  const {lat,lon}=item.point;
-  if(item.catIndex!=null && $('showAiCat').checked){
-   const color=Cesium.Color.fromCssColorString(aiRiskColor(item.catIndex)).withAlpha(item.catIndex>=50?0.22:0.12);
+  const {lat,lon}=item.point,radius=item.radiusM||90000;
+  const layers=[
+   [item.combinedIndex,$('showAiRiskHeat').checked,1],
+   [item.mapCatIndex,$('showAiCat').checked,1],
+   [item.mapConvectiveIndex,$('showAiConvective').checked,0.76]
+  ];
+  layers.forEach(([index,visible,scale])=>{
+   if(index==null||!visible)return;
+   const color=Cesium.Color.fromCssColorString(aiRiskColor(index)).withAlpha(0.17);
    aiCesiumEntities.push(cesiumViewer.entities.add({
     position:Cesium.Cartesian3.fromDegrees(lon,lat,9000),
-    ellipse:{semiMajorAxis:item.radiusM||90000,semiMinorAxis:item.radiusM||90000,material:color,outline:true,outlineColor:color.withAlpha(0.85),height:9000}
+    ellipse:{semiMajorAxis:radius*scale,semiMinorAxis:radius*scale,material:color,outline:false,height:9000}
    }));
-  }
-  if(item.convectiveIndex!=null && $('showAiConvective').checked){
-   const color=Cesium.Color.fromCssColorString(aiRiskColor(item.convectiveIndex)).withAlpha(item.convectiveIndex>=50?0.2:0.1);
+  });
+  if($('showWindFlow').checked&&Number.isFinite(item.flowU)&&Number.isFinite(item.flowV)){
+   const vectorLength=radius*0.75;
+   const lat2=lat+item.flowV*vectorLength/111320;
+   const lon2=lon+item.flowU*vectorLength/(111320*Math.max(0.15,Math.cos(lat*Math.PI/180)));
    aiCesiumEntities.push(cesiumViewer.entities.add({
-    position:Cesium.Cartesian3.fromDegrees(lon,lat,10000),
-    ellipse:{semiMajorAxis:(item.radiusM||90000)*0.76,semiMinorAxis:(item.radiusM||90000)*0.76,material:color,outline:true,outlineColor:color.withAlpha(0.8),height:10000}
+    polyline:{positions:Cesium.Cartesian3.fromDegreesArrayHeights([lon,lat,9800,lon2,lat2,9800]),width:2,material:Cesium.Color.WHITE.withAlpha(0.8)}
    }));
   }
  });
@@ -1176,22 +1187,24 @@ function renderAssessment(){
 }
 $('aiRefreshBtn').onclick=()=>refreshAiGrid(true);
 $('aiClearBtn').onclick=()=>{
- aiGridResults=[];aiCatLayer.clearLayers();aiConvectiveLayer.clearLayers();renderAiCesiumLayers();
- $('aiSummary').textContent='AI 위험기상 레이어를 지웠습니다.';
+ aiGridResults=[];
+ [aiCompositeCanvasLayer,aiCatCanvasLayer,aiConvectiveCanvasLayer,aiWindCanvasLayer,aiContourCanvasLayer,aiFlowCanvasLayer]
+  .forEach(layer=>layer.setData([],null));
+ aiCatLayer.clearLayers();aiConvectiveLayer.clearLayers();renderAiCesiumLayers();
+ $('aiSummary').textContent='AI 기상 레이어를 지웠습니다.';
 };
-$('showAiCat').onchange=()=>{
- if($('showAiCat').checked)aiCatLayer.addTo(map);else map.removeLayer(aiCatLayer);
- renderAiCesiumLayers();
-};
-$('showAiConvective').onchange=()=>{
- if($('showAiConvective').checked)aiConvectiveLayer.addTo(map);else map.removeLayer(aiConvectiveLayer);
- renderAiCesiumLayers();
-};
+['showAiRiskHeat','showAiCat','showAiConvective','showWindSpeedHeat','showHeightContours','showWindFlow'].forEach(id=>{
+ $(id).onchange=()=>{setCanvasLayerVisibility();renderAiCesiumLayers()};
+});
 $('aiModel').onchange=()=>refreshAiGrid(true);
-$('horizon').onchange=()=>refreshAiGrid(true);
-$('aiAutoRefresh').onchange=()=>{
- if($('aiAutoRefresh').checked)refreshAiGrid(true);
+$('windPressure').onchange=()=>refreshAiGrid(true);
+$('aiForecastHour').onchange=()=>refreshAiGrid(true);
+$('horizon').onchange=()=>{
+ const selected=Number($('aiForecastHour').value)||0;
+ if(selected>Number($('horizon').value))$('aiForecastHour').value=String(Number($('horizon').value));
+ refreshAiGrid(true);
 };
+$('aiAutoRefresh').onchange=()=>{if($('aiAutoRefresh').checked)refreshAiGrid(true)};
 map.on('moveend zoomend',scheduleAiRefresh);
 setInterval(()=>{if($('aiAutoRefresh').checked)refreshAiGrid(false)},15*60*1000);
 $('refreshBtn').onclick=refreshFeeds;
