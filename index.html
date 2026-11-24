@@ -112,13 +112,13 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
 </div>
 <script>
 const $=id=>document.getElementById(id);
-let map, routeLayer, sigmetLayer, pirepLayer, cesiumViewer, currentRoute=[], sigmets=[], pireps=[], routeAssessments=[];
+let map, routeLayer, riskLayer, sigmetLayer, pirepLayer, cesiumViewer, currentRoute=[], sigmets=[], pireps=[], routeAssessments=[];
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function utcClock(){ $('clock').textContent='UTC '+new Date().toISOString().slice(11,16); }
 setInterval(utcClock,1000);utcClock();
 map=L.map('map',{worldCopyJump:true}).setView([25,145],3);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'&copy; OpenStreetMap'}).addTo(map);
-routeLayer=L.layerGroup().addTo(map);sigmetLayer=L.layerGroup().addTo(map);pirepLayer=L.layerGroup().addTo(map);
+routeLayer=L.layerGroup().addTo(map);riskLayer=L.layerGroup().addTo(map);sigmetLayer=L.layerGroup().addTo(map);pirepLayer=L.layerGroup().addTo(map);
 function setFeed(msg){$('feedStatus').innerHTML=msg}
 async function getJSON(url){const r=await fetch(url);if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}
 function riskColor(level){return level>=4?'#ff5263':level===3?'#fb923c':level===2?'#facc15':'#36d399'}
@@ -126,8 +126,9 @@ function riskLabel(level){return ['낮음','주의','높음','매우 높음','�
 function drawRoute(){
  routeLayer.clearLayers();if(currentRoute.length<2)return;
  const ll=currentRoute.map(p=>[p.lat,p.lon]);
- L.polyline(ll,{color:'#d7e8f5',weight:3,opacity:.85,dashArray:'7 6'}).addTo(routeLayer);
- currentRoute.forEach((p,i)=>L.circleMarker([p.lat,p.lon],{radius:i===0||i===currentRoute.length-1?6:3,color:'#38bdf8',fillColor:'#087ca4',fillOpacity:1,weight:1}).bindPopup(`<b>${i===0?'DEP':i===currentRoute.length-1?'DEST':'WP '+i}</b><br>${p.lat.toFixed(4)}, ${p.lon.toFixed(4)}<br>고도: ${p.alt_ft??$('flightLevel').value} ft MSL`).addTo(routeLayer));
+ L.polyline(ll,{color:'#e8f3fb',weight:2,opacity:.9,dashArray:'6 7'}).addTo(routeLayer);
+ currentRoute.forEach((p,i)=>L.circleMarker([p.lat,p.lon],{radius:i===0||i===currentRoute.length-1?6:3,color:'#ffffff',fillColor:'#087ca4',fillOpacity:1,weight:1}).bindPopup(`<b>${i===0?'DEP':i===currentRoute.length-1?'DEST':'WP '+i}</b><br>${p.lat.toFixed(4)}, ${p.lon.toFixed(4)}<br>고도: ${p.alt_ft??$('flightLevel').value} ft MSL`).addTo(routeLayer));
+ if($('showRoute').checked){if(!map.hasLayer(routeLayer))routeLayer.addTo(map)}else if(map.hasLayer(routeLayer)){map.removeLayer(routeLayer)}
  map.fitBounds(ll,{padding:[35,35]});
 }
 function parseCoords(){return $('coords').value.split(/\n|;/).map(s=>s.trim()).filter(Boolean).map(s=>{const a=s.split(/[,\s]+/).map(Number);if(a.length<2||!Number.isFinite(a[0])||!Number.isFinite(a[1])||Math.abs(a[0])>90||Math.abs(a[1])>180)throw Error('좌표 형식 오류: '+s);return {lat:a[0],lon:a[1],alt_ft:Number($('flightLevel').value)||35000}})}
@@ -165,7 +166,7 @@ $('plotRoute').onclick=async()=>{
   drawRoute();await assessRoute();
  }catch(e){alert(e.message)}
 };
-$('clearRoute').onclick=()=>{currentRoute=[];routeLayer.clearLayers();$('routeRows').innerHTML='<tr><td colspan="5">항로를 입력하고 분석을 실행하세요.</td></tr>';['kpiSegments','kpiPirep','kpiSigmet'].forEach(k=>$(k).textContent='0');$('kpiRisk').textContent='-'};
+$('clearRoute').onclick=()=>{currentRoute=[];routeLayer.clearLayers();riskLayer.clearLayers();$('routeRows').innerHTML='<tr><td colspan="5">항로를 입력하고 분석을 실행하세요.</td></tr>';['kpiSegments','kpiPirep','kpiSigmet'].forEach(k=>$(k).textContent='0');$('kpiRisk').textContent='-'};
 $('showRoute').onchange=e=>e.target.checked?routeLayer.addTo(map):map.removeLayer(routeLayer);
 $('showSigmet').onchange=e=>e.target.checked?sigmetLayer.addTo(map):map.removeLayer(sigmetLayer);
 $('showPirep').onchange=e=>e.target.checked?pirepLayer.addTo(map):map.removeLayer(pirepLayer);
@@ -255,13 +256,70 @@ async function assessRoute(){
  );
 }
 function renderAssessment(){
- const rows=routeAssessments;$('kpiSegments').textContent=Math.max(0,rows.length-1);
- const max=rows.reduce((m,r)=>Math.max(m,r.score??0),0);$('kpiRisk').textContent=rows.length?riskLabel(max):'-';
- if(!$('showRisk').checked){$('routeRows').innerHTML='<tr><td colspan="5">위험도 레이어가 꺼져 있습니다.</td></tr>';return}
- routeLayer.clearLayers();drawRoute();
+ const rows=routeAssessments;
+ $('kpiSegments').textContent=Math.max(0,rows.length-1);
+ const max=rows.reduce((m,r)=>Math.max(m,r.score??0),0);
+ $('kpiRisk').textContent=rows.length?riskLabel(max):'-';
+
+ // Base flight path and turbulence-risk overlays are separate Leaflet layers.
+ routeLayer.clearLayers();
+ riskLayer.clearLayers();
+ drawRoute();
+
+ if($('showRisk').checked && rows.length){
+  // Draw risk-area buffers around every forecast sample point.
+  const radiusByLevel=[24000,32000,42000,54000,68000];
+  rows.forEach((r,i)=>{
+   if(r.score===null || r.score===undefined)return;
+   const level=Math.max(0,Math.min(4,Number(r.score)||0));
+   const color=riskColor(level);
+   const radius=radiusByLevel[level];
+   L.circle([r.p.lat,r.p.lon],{
+    radius,
+    color,
+    weight:2,
+    opacity:.92,
+    fillColor:color,
+    fillOpacity:level>=3?.24:.18,
+    interactive:true
+   }).bindPopup(
+    `<b>난기류 위험구역 · ${riskLabel(level)}</b><br>`+
+    `분석 지점: ${i+1}<br>고도: FL${Math.round(Number($('altitude').value)/100)}<br>`+
+    `수직층 바람벡터 차이: ${r.shear??'-'} m/s<br>`+
+    `자료 시각: ${r.time??'-'}<br>`+
+    `표시 반경: ${Math.round(radius/1000)} km`
+   ).addTo(riskLayer);
+  });
+
+  // Connect neighboring forecast points with a translucent risk corridor
+  // and a narrower colored centerline for easy route-segment comparison.
+  rows.forEach((r,i)=>{
+   if(i===0 || r.score===null || r.score===undefined)return;
+   const prev=rows[i-1];
+   if(!prev || prev.score===null || prev.score===undefined)return;
+   const level=Math.max(0,Math.min(4,Number(r.score)||0));
+   const color=riskColor(level);
+   const positions=[[prev.p.lat,prev.p.lon],[r.p.lat,r.p.lon]];
+   L.polyline(positions,{color,weight:20,opacity:.20,lineCap:'round',lineJoin:'round'}).addTo(riskLayer);
+   L.polyline(positions,{color,weight:7,opacity:.95,lineCap:'round',lineJoin:'round'})
+    .bindPopup(
+     `<b>난기류 위험구간 · ${riskLabel(level)}</b><br>`+
+     `풍속: ${r.wind??'-'} m/s<br>수직층 바람벡터 차이: ${r.shear??'-'} m/s`
+    ).addTo(riskLayer);
+  });
+ }
+ // Respect independent visibility toggles even after re-rendering.
+ if($('showRoute').checked){if(!map.hasLayer(routeLayer))routeLayer.addTo(map)}
+ else if(map.hasLayer(routeLayer)){map.removeLayer(routeLayer)}
+ if($('showRisk').checked){if(!map.hasLayer(riskLayer))riskLayer.addTo(map)}
+ else if(map.hasLayer(riskLayer)){map.removeLayer(riskLayer)}
+
  let html='';
- rows.forEach((r,i)=>{if(i>0&&r.score!=null){const prev=rows[i-1];const c=riskColor(r.score);L.polyline([[prev.p.lat,prev.p.lon],[r.p.lat,r.p.lon]],{color:c,weight:7,opacity:.9}).bindPopup(`<b>${riskLabel(r.score)}</b><br>풍속 ${r.wind??'-'} m/s<br>수직층 풍속차 기반 선별지표`).addTo(routeLayer)}
- html+=`<tr><td>${i+1}</td><td>${r.p.lat.toFixed(2)}, ${r.p.lon.toFixed(2)}</td><td>FL${Math.round(Number($('altitude').value)/100)}</td><td><span class="badge ${r.score>=4?'b-red':r.score===3?'b-orange':r.score===2?'b-yellow':r.score===1?'b-green':'b-blue'}">${r.category||'자료없음'}</span></td><td>${r.shear!=null?'풍속차 '+r.shear+' m/s':esc(r.error||'자료 없음')}</td></tr>`});
+ rows.forEach((r,i)=>{
+  const score=r.score;
+  const badgeClass=score===null||score===undefined?'b-blue':score>=4?'b-red':score===3?'b-orange':score===2?'b-yellow':score===1?'b-green':'b-blue';
+  html+=`<tr><td>${i+1}</td><td>${r.p.lat.toFixed(2)}, ${r.p.lon.toFixed(2)}</td><td>FL${Math.round(Number($('altitude').value)/100)}</td><td><span class="badge ${badgeClass}">${r.category||'자료없음'}</span></td><td>${r.shear!=null?'풍속차 '+r.shear+' m/s':esc(r.error||'자료 없음')}</td></tr>`;
+ });
  $('routeRows').innerHTML=html||'<tr><td colspan="5">분석 결과가 없습니다.</td></tr>';
 }
 $('refreshBtn').onclick=refreshFeeds;
