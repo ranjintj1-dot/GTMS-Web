@@ -77,15 +77,26 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
    <option value="aifs">ECMWF AIFS AI</option>
    <option value="ifs">ECMWF IFS 물리모델</option>
   </select>
-  <label><input type="checkbox" id="showAiCat" checked> CAT / 수직시어 위험 레이어</label>
-  <label><input type="checkbox" id="showAiConvective" checked> 대류성 난기류 위험 레이어</label>
+  <label>예보 시각</label>
+  <select id="aiForecastHour">
+   <option value="0" selected>가장 가까운 예보</option><option value="6">+6시간</option><option value="12">+12시간</option>
+   <option value="18">+18시간</option><option value="24">+24시간</option><option value="36">+36시간</option><option value="48">+48시간</option>
+  </select>
+  <label>바람장 고도</label>
+  <select id="windPressure"><option value="300">300 hPa · 약 9.2 km</option><option value="250" selected>250 hPa · 약 10.4 km</option><option value="200">200 hPa · 약 11.8 km</option></select>
+  <label><input type="checkbox" id="showAiRiskHeat" checked> 종합 난기류 위험도 컬러필드</label>
+  <label><input type="checkbox" id="showAiCat"> CAT / 수직시어 단독 레이어</label>
+  <label><input type="checkbox" id="showAiConvective"> 대류성 난기류 단독 레이어</label>
+  <label><input type="checkbox" id="showWindSpeedHeat"> 바람 속도 컬러필드</label>
+  <label><input type="checkbox" id="showWindFlow" checked> 바람 흐름 애니메이션</label>
+  <label><input type="checkbox" id="showHeightContours" checked> 지위고도 등고선</label>
   <label><input type="checkbox" id="aiAutoRefresh" checked> 지도 이동 및 주기적 자동 갱신</label>
   <div class="row" style="margin-top:8px">
    <button id="aiRefreshBtn" class="primary">AI 위험기상 분석</button>
    <button id="aiClearBtn">AI 레이어 지우기</button>
   </div>
   <div id="aiSummary" class="hint" style="margin-top:8px">ECMWF AIFS AI + IFS 모델 연결 대기 중</div>
-  <div class="hint">AIFS 예보는 6시간 간격으로 갱신됩니다. 화면은 15분마다 자료 갱신 여부를 확인합니다. 위험지수는 실험적 선별값이며 EDR 실측값이나 승인된 난기류 예보가 아닙니다.</div>
+  <div class="hint">색상: AI 위험지수 연속 보간 · 흰색 입자: 선택 기압면의 바람 방향/속도 · 흰색 선: 지위고도 등고선. AIFS는 6시간 간격 예보이며 화면은 15분마다 갱신 여부를 확인합니다.</div><div class="hint">위험지수는 EDR 실측값이나 승인된 난기류 예보가 아닌 실험적 선별값입니다.</div>
   <div class="hint">NOAA SIGMET / PIREP은 Cloudflare Worker 중계로 수신합니다. Worker 주소는 noaa-proxy-config.js에 설정합니다.</div>
  </section>
  <section class="panel">
