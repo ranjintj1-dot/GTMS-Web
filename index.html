@@ -352,6 +352,7 @@ async function refreshAiGrid(force=false){
    };
   });
   drawAiLayers(aiGridResults,meta);
+  renderAiCesiumLayers();
   const valid=aiGridResults.filter(p=>p.catIndex!=null||p.convectiveIndex!=null);
   const maxCat=Math.max(0,...valid.map(p=>p.catIndex??0));
   const maxConv=Math.max(0,...valid.map(p=>p.convectiveIndex??0));
@@ -683,7 +684,7 @@ function renderAssessment(){
 }
 $('aiRefreshBtn').onclick=()=>refreshAiGrid(true);
 $('aiClearBtn').onclick=()=>{
- aiGridResults=[];aiCatLayer.clearLayers();aiConvectiveLayer.clearLayers();
+ aiGridResults=[];aiCatLayer.clearLayers();aiConvectiveLayer.clearLayers();renderAiCesiumLayers();
  $('aiSummary').textContent='AI 위험기상 레이어를 지웠습니다.';
 };
 $('showAiCat').onchange=()=>{
