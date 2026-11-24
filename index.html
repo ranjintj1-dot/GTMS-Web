@@ -32,7 +32,13 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
 #feedStatus{font-size:11px;color:var(--muted);line-height:1.6}.route-list{max-height:190px;overflow:auto}.route-list table{font-size:11px}
 .notice{border-left:3px solid #f59e0b;padding:8px 10px;background:#302714;color:#fce7b2;font-size:11px;border-radius:4px;margin-top:8px}
 .leaflet-popup-content-wrapper,.leaflet-popup-tip{background:#0b2639;color:#e8f3fb}.leaflet-popup-content{font-size:12px}
-@media(max-width:900px){.layout{grid-template-columns:1fr}aside{max-height:none;border-right:0;border-bottom:1px solid var(--line)}.mapwrap{height:55vh;min-height:380px}.below{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,1fr)}}
+.map-timeline{position:absolute;z-index:900;left:50%;bottom:12px;transform:translateX(-50%);width:min(620px,calc(100% - 340px));min-width:280px;display:flex;align-items:center;gap:12px;padding:10px 14px;background:rgba(5,22,36,.92);border:1px solid #42647b;border-radius:10px;box-shadow:0 5px 18px #0007;backdrop-filter:blur(8px)}
+.map-timeline .time-label{min-width:95px;font-size:12px;font-weight:700;color:#eaf7ff;white-space:nowrap}
+.map-timeline .time-sub{font-size:10px;color:#a8c4d5;white-space:nowrap}
+.map-timeline input[type=range]{flex:1;min-width:70px;accent-color:#38bdf8;cursor:pointer}
+.map-timeline .time-start,.map-timeline .time-end{font-size:10px;color:#a8c4d5;white-space:nowrap}
+.mapnote{bottom:76px}
+@media(max-width:900px){.layout{grid-template-columns:1fr}aside{max-height:none;border-right:0;border-bottom:1px solid var(--line)}.mapwrap{height:55vh;min-height:380px}.map-timeline{width:calc(100% - 24px);min-width:0;left:12px;transform:none;gap:8px;padding:8px 10px}.map-timeline .time-sub{display:none}.mapnote{bottom:66px}.below{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,1fr)}}
 </style>
 </head>
 <body>
@@ -121,7 +127,17 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
    <span>HIGH</span>
   </div>
  </div>
- <div class="mapwrap"><div id="map"></div><div id="cesiumMap"></div><div class="mapnote">Windy형 색상장: ECMWF 예보변수 기반 실험적 난기류 위험지수 · 흰색 입자: 선택 고도 바람 흐름 · 흰색 등고선: 지위고도</div></div>
+ <div class="mapwrap">
+  <div id="map"></div><div id="cesiumMap"></div>
+  <div class="mapnote">색상: AI 난기류 위험지수 · 흰색 입자: 선택 고도 바람 방향/속도 · 등고선: 지위고도</div>
+  <div class="map-timeline">
+   <span class="time-start">현재</span>
+   <input id="aiTimelineSlider" type="range" min="0" max="48" step="6" value="0" aria-label="AI 기상 예보 시각">
+   <span class="time-end">+48h</span>
+   <span class="time-label" id="aiTimelineLabel">가장 가까운 예보</span>
+   <span class="time-sub">UTC · 6시간 간격</span>
+  </div>
+ </div>
  <div class="below">
   <section class="card">
    <h2>ROUTE TURBULENCE ASSESSMENT</h2>
@@ -565,7 +581,7 @@ async function fetchEcmwfGrid(model,points,horizon){
   longitude:points.map(p=>p.lon).join(','),
   hourly:hourly.join(','),
   models:model,
-  forecast_hours:String(horizon),
+  forecast_hours:String(Math.min(120,horizon+24)),
   timezone:'UTC',
   wind_speed_unit:'ms',
   temperature_unit:'celsius'
@@ -1217,12 +1233,25 @@ $('aiClearBtn').onclick=()=>{
 });
 $('aiModel').onchange=()=>refreshAiGrid(true);
 $('windPressure').onchange=()=>refreshAiGrid(true);
-$('aiForecastHour').onchange=()=>refreshAiGrid(true);
+function syncAiTimeline(){
+ const lead=Number($('aiForecastHour').value)||0;
+ $('aiTimelineSlider').value=String(lead);
+ $('aiTimelineSlider').max=String(Number($('horizon').value)||48);
+ $('aiTimelineLabel').textContent=lead===0?'가장 가까운 예보':'+'+lead+'시간';
+}
+$('aiTimelineSlider').oninput=()=>{
+ $('aiForecastHour').value=$('aiTimelineSlider').value;
+ syncAiTimeline();
+};
+$('aiTimelineSlider').onchange=()=>refreshAiGrid(true);
+$('aiForecastHour').onchange=()=>{syncAiTimeline();refreshAiGrid(true)};
 $('horizon').onchange=()=>{
  const selected=Number($('aiForecastHour').value)||0;
  if(selected>Number($('horizon').value))$('aiForecastHour').value=String(Number($('horizon').value));
+ syncAiTimeline();
  refreshAiGrid(true);
 };
+syncAiTimeline();
 $('aiAutoRefresh').onchange=()=>{if($('aiAutoRefresh').checked)refreshAiGrid(true)};
 map.on('moveend zoomend',scheduleAiRefresh);
 setInterval(()=>{if($('aiAutoRefresh').checked)refreshAiGrid(false)},15*60*1000);
