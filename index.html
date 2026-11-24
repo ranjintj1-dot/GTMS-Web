@@ -189,15 +189,16 @@ function numericAt(hourly,key,index){
  const value=hourly?.[key]?.[index];
  return value===null||value===undefined||!Number.isFinite(Number(value))?null:Number(value);
 }
-function evaluateModelPoint(row,horizonHours){
+function evaluateModelPoint(row,horizonHours,targetLeadHours,windPressure){
  const hourly=modelHourly(row);
  if(!hourly||!Array.isArray(hourly.time)||!hourly.time.length)return null;
  const time=hourly.time;
- let catBest=null,convBest=null;
+ let catBest=null,convBest=null,selected=null,selectedDelta=Infinity;
+ const levels=[300,250,200];
+ const windIndex=Math.max(0,levels.indexOf(Number(windPressure)));
  for(let i=0;i<time.length;i++){
   const lead=(new Date(time[i]).getTime()-Date.now())/3600000;
   if(lead < -0.5 || lead > horizonHours)continue;
-  const levels=[300,250,200];
   const winds=levels.map(level=>windUV(
    numericAt(hourly,'wind_speed_'+level+'hPa',i),
    numericAt(hourly,'wind_direction_'+level+'hPa',i)
@@ -205,14 +206,14 @@ function evaluateModelPoint(row,horizonHours){
   const temps=levels.map(level=>numericAt(hourly,'temperature_'+level+'hPa',i));
   const heights=levels.map(level=>numericAt(hourly,'geopotential_height_'+level+'hPa',i));
   let shearMsKm=null,ri=null;
-  for(const [a,b] of [[0,1],[1,2]]){
+  for(const pair of [[0,1],[1,2]]){
+   const a=pair[0],b=pair[1];
    if(!winds[a]||!winds[b])continue;
    const fallbackZ=[9200,10400,11800];
    const dz=Math.abs((heights[a]??fallbackZ[a])-(heights[b]??fallbackZ[b]));
    if(dz<100)continue;
    const dv=Math.hypot(winds[b].u-winds[a].u,winds[b].v-winds[a].v);
-   const value=dv/(dz/1000);
-   shearMsKm=Math.max(shearMsKm??0,value);
+   shearMsKm=Math.max(shearMsKm??0,dv/(dz/1000));
   }
   if(temps[0]!=null&&temps[1]!=null&&winds[0]&&winds[1]){
    const fallbackZ=[9200,10400];
@@ -230,7 +231,6 @@ function evaluateModelPoint(row,horizonHours){
   const shearComponent=shearMsKm==null?0:clamp01(shearMsKm/10);
   const riComponent=ri==null?0.25:ri<0.25?1:ri<0.5?0.82:ri<1?0.60:ri<2?0.32:0.08;
   const catIndex=shearMsKm==null?null:Math.round(100*(0.68*shearComponent+0.32*riComponent));
-
   const cape=numericAt(hourly,'cape',i);
   const precipitation=numericAt(hourly,'precipitation',i);
   const omega=numericAt(hourly,'vertical_velocity_500hPa',i);
@@ -242,6 +242,19 @@ function evaluateModelPoint(row,horizonHours){
    0.15*clamp01(Math.abs(omega??0)/0.5)+
    0.08*clamp01((cloud??0)/100)
   )):null;
+  const candidate={
+   catIndex,convectiveIndex,time:time[i],shearMsKm,richardson:ri,
+   cape,precipitation,omega,cloud,
+   flow:winds[windIndex]?{
+    u:winds[windIndex].u,v:winds[windIndex].v,
+    speed:numericAt(hourly,'wind_speed_'+windPressure+'hPa',i),
+    direction:numericAt(hourly,'wind_direction_'+windPressure+'hPa',i),
+    heightM:heights[windIndex],time:time[i]
+   }:null
+  };
+  if(Math.abs(lead-targetLeadHours)<selectedDelta){
+   selected=candidate;selectedDelta=Math.abs(lead-targetLeadHours);
+  }
   if(catIndex!=null&&(!catBest||catIndex>catBest.index)){
    catBest={index:catIndex,time:time[i],shearMsKm,richardson:ri};
   }
@@ -249,7 +262,7 @@ function evaluateModelPoint(row,horizonHours){
    convBest={index:convectiveIndex,time:time[i],cape,precipitation,omega,cloud};
   }
  }
- return {cat:catBest,convective:convBest};
+ return {cat:catBest,convective:convBest,selected};
 }
 function blendModelRisk(a,b,weightA=0.6){
  if(a==null&&b==null)return null;
