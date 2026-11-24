@@ -1,11 +1,16 @@
 services:
   - type: web
-    name: gtms-global-turbulence-monitor
-    runtime: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python server.py
-    healthCheckPath: /api/health
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.8
+    name: gtms-static
+    runtime: static
+    buildCommand: ""
+    staticPublishPath: .
+    headers:
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+      - path: /index.html
+        name: Cache-Control
+        value: no-cache, no-store, must-revalidate
