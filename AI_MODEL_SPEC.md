@@ -54,14 +54,15 @@ If one model is unavailable, the other model's index is used and the status pane
 - The visible Leaflet map bounds are sampled into a multi-location analysis grid, capped at 84 points per model request.
 - Forecast fields are fetched from Open-Meteo's ECMWF endpoint for AIFS and IFS 0.25° model selections.
 - The user selects a forecast lead time and a pressure level (300, 250 or 200 hPa) for the map's wind field.
-- The composite risk layer is rendered as an interpolated HTML canvas colour field. Separate CAT, convective and wind-speed canvas layers are available.
+- Composite, CAT, convective and wind-speed fields are rendered as separate rectangular grid-cell layers. Each cell uses the value at its forecast grid point; dark cell borders make the analysis zones distinct, and the composite cell may display its 0–100 index.
+- The display grid is sized to roughly 80 screen pixels per cell and is capped at 84 points per model request. The cells are a display aggregation of the forecast samples, not new high-resolution model data.
 - Animated white particles are advected using the selected pressure-level U/V wind components; these are visual flow tracers, not aircraft trajectories.
-- White contour lines are interpolated from geopotential height at the selected pressure level. They are height contours, not sea-level pressure isobars.
-- 2D Leaflet and 3D Cesium views have separate renderers. The 3D view approximates the continuous field with translucent grid-cell ellipses and wind-vector lines.
+- No isobars or geopotential-height contour lines are drawn.
+- 2D Leaflet and 3D Cesium views both use rectangular grid zones. The 2D view uses canvas cells with visible borders; the 3D view uses translucent rectangular geographic cells and wind-vector lines.
 - Panning or zooming schedules a new grid query. The automatic polling interval is 15 minutes, but the underlying models update less frequently.
 - This is not a live turbulence sensor feed. AIFS Single provides 6-hourly forecast time steps and is updated every six hours. Open-data IFS 0.25° has 3-hourly and 6-hourly output and is updated every six hours. A 15-minute screen refresh may therefore display the same model run repeatedly.
 
-The rendered colour field is an interpolation of forecast grid-point values for visual continuity; it does not add physical forecast resolution beyond the source model's approximately 0.25° grid (roughly 25–28 km).
+The square-cell display does not add physical forecast resolution beyond the source model's approximately 0.25° grid (roughly 25–28 km). Each tile is a readable display zone derived from the nearest sampled forecast point.
 
 ## 4. Experimental risk categories
 
