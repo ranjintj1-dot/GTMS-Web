@@ -142,14 +142,23 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
 <script>
 const NOAA_PROXY_BASE=String(window.GTMS_NOAA_PROXY_URL||'').replace(/\/+$/,'');
 const $=id=>document.getElementById(id);
-let map, routeLayer, riskLayer, sigmetLayer, pirepLayer, aiCatLayer, aiConvectiveLayer, cesiumViewer, currentRoute=[], sigmets=[], pireps=[], routeAssessments=[];
-let aiGridResults=[], aiRefreshTimer=null, aiLastRefreshAt=0, aiBusy=false, aiCesiumEntities=[];
+let map, routeLayer, riskLayer, sigmetLayer, pirepLayer, aiCatLayer, aiConvectiveLayer, aiCompositeCanvasLayer, aiCatCanvasLayer, aiConvectiveCanvasLayer, aiWindCanvasLayer, aiContourCanvasLayer, aiFlowCanvasLayer, cesiumViewer, currentRoute=[], sigmets=[], pireps=[], routeAssessments=[];
+let aiGridResults=[], aiGridMeta=null, aiRefreshTimer=null, aiLastRefreshAt=0, aiBusy=false, aiCesiumEntities=[];
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function utcClock(){ $('clock').textContent='UTC '+new Date().toISOString().slice(11,16); }
 setInterval(utcClock,1000);utcClock();
 map=L.map('map',{worldCopyJump:true}).setView([25,145],3);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'&copy; OpenStreetMap'}).addTo(map);
 routeLayer=L.layerGroup().addTo(map);riskLayer=L.layerGroup().addTo(map);sigmetLayer=L.layerGroup().addTo(map);pirepLayer=L.layerGroup().addTo(map);aiCatLayer=L.layerGroup().addTo(map);aiConvectiveLayer=L.layerGroup().addTo(map);
+map.createPane('aiHeatPane');map.getPane('aiHeatPane').style.zIndex=350;map.getPane('aiHeatPane').style.pointerEvents='none';
+map.createPane('aiContourPane');map.getPane('aiContourPane').style.zIndex=420;map.getPane('aiContourPane').style.pointerEvents='none';
+map.createPane('aiFlowPane');map.getPane('aiFlowPane').style.zIndex=430;map.getPane('aiFlowPane').style.pointerEvents='none';
+aiCompositeCanvasLayer=createAiCanvasLayer('composite','aiHeatPane').addTo(map);
+aiCatCanvasLayer=createAiCanvasLayer('cat','aiHeatPane');
+aiConvectiveCanvasLayer=createAiCanvasLayer('convective','aiHeatPane');
+aiWindCanvasLayer=createAiCanvasLayer('wind','aiHeatPane');
+aiContourCanvasLayer=createAiCanvasLayer('contour','aiContourPane').addTo(map);
+aiFlowCanvasLayer=createAiCanvasLayer('flow','aiFlowPane').addTo(map);
 function setFeed(msg){$('feedStatus').innerHTML=msg}
 async function getJSON(url){const r=await fetch(url);if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}
 function riskColor(level){return level>=4?'#ff5263':level===3?'#fb923c':level===2?'#facc15':'#36d399'}
