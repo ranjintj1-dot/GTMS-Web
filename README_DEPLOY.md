@@ -1,30 +1,43 @@
-# GTMS — 정적 웹사이트 배포 안내
+# GTMS — 정적 웹사이트 및 NOAA 데이터 연결
 
-## 배포 방식
-이 저장소는 **Render Static Site**로 배포합니다. Python 서버, 백엔드 프로세스, 포트 설정은 사용하지 않습니다.
+## 웹사이트
+GTMS는 HTML, CSS, JavaScript만 사용하는 정적 웹사이트입니다. Python 서버나 백엔드는 사용하지 않습니다.
 
-`render.yaml`에 정적 사이트 설정이 들어 있으므로 Render에서 Blueprint를 생성하고 저장소를 연결하면 됩니다.
+- 웹주소: https://gtms-static.onrender.com
+- 저장소: https://github.com/ranjintj1-dot/GTMS-Web
+- 배포: Render Static Site
+- 브랜치: main
+- GitHub에 커밋하면 Render가 자동으로 웹사이트를 재배포합니다.
 
-1. Render 대시보드에서 **New → Blueprint**를 선택합니다.
-2. GitHub 저장소 `ranjintj1-dot/GTMS-Web`을 선택합니다.
-3. 설정 파일 `render.yaml`에 표시되는 서비스가 **Static Site**인지 확인합니다.
-4. Preview/Plan 내용을 확인한 뒤 배포를 승인합니다.
-5. 상태가 **Live**가 되면 발급된 `.onrender.com` 주소로 접속합니다.
+## NOAA SIGMET / PIREP 자동 지도 표출 연결
 
-직접 생성할 때는 **New → Static Site**를 선택하고 다음처럼 지정합니다.
-- Repository: `https://github.com/ranjintj1-dot/GTMS-Web`
-- Branch: `main`
-- Build Command: 비워 둠
-- Publish Directory: `.`
+NOAA Aviation Weather API는 브라우저 CORS 요청을 허용하지 않으므로 Cloudflare Worker가 중계합니다. Worker 소스와 Wrangler 설정은 `cloudflare/` 폴더에 있습니다.
 
-## 접속 방식
-- 로그인 없이 URL을 열면 바로 접속합니다.
-- 공개 URL을 아는 사람은 누구나 접속할 수 있습니다. 민감한 항공편/운항 자료는 입력하지 마세요.
+1. Cloudflare Dashboard의 **Workers & Pages**로 이동합니다.
+2. **Create application → Workers → Connect to Git**을 선택합니다.
+3. GitHub 계정 연결을 승인하고 저장소 `ranjintj1-dot/GTMS-Web`을 선택합니다.
+4. Worker 이름을 **gtms-noaa-proxy**로 지정합니다.
+5. Root directory를 **cloudflare**로 설정합니다.
+6. Build command는 비워두고 Deploy command는 `npx wrangler deploy`로 둡니다.
+7. **Save and Deploy**를 누릅니다.
+8. Cloudflare가 발급한 `https://gtms-noaa-proxy.<account-subdomain>.workers.dev` 주소를 확인합니다.
+9. GTMS 저장소의 루트 파일 `noaa-proxy-config.js`에서 다음 줄에 실제 Worker 주소를 입력합니다.
+   `window.GTMS_NOAA_PROXY_URL = "https://gtms-noaa-proxy.<account-subdomain>.workers.dev";`
+10. 해당 변경을 GitHub `main` 브랜치에 커밋합니다. Render가 정적 웹사이트를 자동 재배포합니다.
 
-## 기능 및 외부 API
-- 지도/화면/항로 입력 기능은 브라우저에서 실행됩니다.
-- Open-Meteo ECMWF IFS 예보는 브라우저에서 직접 조회합니다.
-- NOAA Aviation Weather API는 CORS 정책상 브라우저 직접 호출이 차단되어 있습니다. SIGMET/PIREP은 공식 API 링크로 이동해 확인하도록 표시됩니다. 웹 화면 안에서 자동 지도 표시까지 필요하면 별도의 JavaScript 프록시 서비스가 필요합니다.
+### Worker 테스트 주소
+실제 발급 URL 뒤에 아래 경로를 붙여 확인합니다.
 
-## 안전상 주의
-위험등급은 압력면 바람벡터 차이에 기반한 실험적 스크리닝 지표이며 검증된 EDR 예측/관측값이 아닙니다. 공식 항공기상 정보와 회사 운항통제 절차를 대체하지 않습니다.
+- `/api/health` — Worker 상태
+- `/api/sigmets` — SIGMET GeoJSON
+- `/api/pireps` — 최근 6시간 PIREP/AIREP GeoJSON
+
+### 중계 및 새로고침 정책
+- Worker는 허용된 GTMS 웹사이트 Origin만 브라우저 호출을 허용합니다.
+- NOAA 응답은 60초 캐시하여 잦은 원본 API 호출을 방지합니다.
+- NOAA는 API 요청 제한(분당 100회 및 개별 스레드의 엔드포인트별 최소 1분 간격)을 명시합니다. GTMS 새로고침은 5분 간격입니다.
+
+## 데이터 범위 및 운항상 주의
+- NOAA SIGMET: 전 세계 항공기상 특보 자료.
+- NOAA PIREP/AIREP: 주로 미국 및 북대서양 자료로, 전 세계 조종사 보고를 모두 포함하지 않습니다.
+- Open-Meteo ECMWF IFS 바람 자료 기반 난기류 지표는 실험적 바람벡터 차이 스크리닝입니다. 검증된 EDR 관측값이나 공식 난기류 예보가 아니며, 승인된 운항 기상정보·운항통제 절차를 대체하지 않습니다.
