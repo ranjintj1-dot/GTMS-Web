@@ -95,14 +95,13 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
   <label><input type="checkbox" id="showAiConvective"> 대류성 난기류 단독 레이어</label>
   <label><input type="checkbox" id="showWindSpeedHeat"> 바람 속도 컬러필드</label>
   <label><input type="checkbox" id="showWindFlow" checked> 바람 흐름 애니메이션</label>
-  <label><input type="checkbox" id="showHeightContours" checked> 지위고도 등고선</label>
   <label><input type="checkbox" id="aiAutoRefresh" checked> 지도 이동 및 주기적 자동 갱신</label>
   <div class="row" style="margin-top:8px">
    <button id="aiRefreshBtn" class="primary">AI 위험기상 분석</button>
    <button id="aiClearBtn">AI 레이어 지우기</button>
   </div>
   <div id="aiSummary" class="hint" style="margin-top:8px">ECMWF AIFS AI + IFS 모델 연결 대기 중</div>
-  <div class="hint">색상: AI 위험지수 연속 보간 · 흰색 입자: 선택 기압면의 바람 방향/속도 · 흰색 선: 지위고도 등고선. AIFS는 6시간 간격 예보이며 화면은 15분마다 갱신 여부를 확인합니다.</div><div class="hint">위험지수는 EDR 실측값이나 승인된 난기류 예보가 아닌 실험적 선별값입니다.</div>
+  <div class="hint">색상 타일: AI 난기류 위험지수 · 타일 경계: 분석 구역 · 흰색 입자: 선택 기압면 바람 흐름. 등압선·지위고도 등고선은 표시하지 않습니다.</div><div class="hint">위험지수는 EDR 실측값이나 승인된 난기류 예보가 아닌 실험적 선별값입니다.</div>
   <div class="hint">NOAA SIGMET / PIREP은 Cloudflare Worker 중계로 수신합니다. Worker 주소는 noaa-proxy-config.js에 설정합니다.</div>
  </section>
  <section class="panel">
@@ -129,7 +128,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
  </div>
  <div class="mapwrap">
   <div id="map"></div><div id="cesiumMap"></div>
-  <div class="mapnote">색상: AI 난기류 위험지수 · 흰색 입자: 선택 고도 바람 방향/속도 · 등고선: 지위고도</div>
+  <div class="mapnote">색상 타일: AI 난기류 위험지수 · 흰색 입자: 선택 고도 바람 흐름 · 격자 경계: 분석 구역</div>
   <div class="map-timeline">
    <span class="time-start">현재</span>
    <input id="aiTimelineSlider" type="range" min="0" max="48" step="6" value="0" aria-label="AI 기상 예보 시각">
@@ -161,7 +160,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
 <script>
 const NOAA_PROXY_BASE=String(window.GTMS_NOAA_PROXY_URL||'').replace(/\/+$/,'');
 const $=id=>document.getElementById(id);
-let map, routeLayer, riskLayer, sigmetLayer, pirepLayer, aiCatLayer, aiConvectiveLayer, aiCompositeCanvasLayer, aiCatCanvasLayer, aiConvectiveCanvasLayer, aiWindCanvasLayer, aiContourCanvasLayer, aiFlowCanvasLayer, cesiumViewer, currentRoute=[], sigmets=[], pireps=[], routeAssessments=[];
+let map, routeLayer, riskLayer, sigmetLayer, pirepLayer, aiCatLayer, aiConvectiveLayer, aiCompositeCanvasLayer, aiCatCanvasLayer, aiConvectiveCanvasLayer, aiWindCanvasLayer, aiFlowCanvasLayer, cesiumViewer, currentRoute=[], sigmets=[], pireps=[], routeAssessments=[];
 let aiGridResults=[], aiGridMeta=null, aiRefreshTimer=null, aiLastRefreshAt=0, aiBusy=false, aiCesiumEntities=[];
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function utcClock(){ $('clock').textContent='UTC '+new Date().toISOString().slice(11,16); }
@@ -170,13 +169,11 @@ map=L.map('map',{worldCopyJump:true}).setView([25,145],3);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'&copy; OpenStreetMap'}).addTo(map);
 routeLayer=L.layerGroup().addTo(map);riskLayer=L.layerGroup().addTo(map);sigmetLayer=L.layerGroup().addTo(map);pirepLayer=L.layerGroup().addTo(map);aiCatLayer=L.layerGroup().addTo(map);aiConvectiveLayer=L.layerGroup().addTo(map);
 map.createPane('aiHeatPane');map.getPane('aiHeatPane').style.zIndex=350;map.getPane('aiHeatPane').style.pointerEvents='none';
-map.createPane('aiContourPane');map.getPane('aiContourPane').style.zIndex=420;map.getPane('aiContourPane').style.pointerEvents='none';
 map.createPane('aiFlowPane');map.getPane('aiFlowPane').style.zIndex=430;map.getPane('aiFlowPane').style.pointerEvents='none';
 aiCompositeCanvasLayer=createAiCanvasLayer('composite','aiHeatPane').addTo(map);
 aiCatCanvasLayer=createAiCanvasLayer('cat','aiHeatPane');
 aiConvectiveCanvasLayer=createAiCanvasLayer('convective','aiHeatPane');
 aiWindCanvasLayer=createAiCanvasLayer('wind','aiHeatPane');
-aiContourCanvasLayer=createAiCanvasLayer('contour','aiContourPane').addTo(map);
 aiFlowCanvasLayer=createAiCanvasLayer('flow','aiFlowPane').addTo(map);
 function setFeed(msg){$('feedStatus').innerHTML=msg}
 async function getJSON(url){
@@ -380,90 +377,83 @@ function createAiCanvasLayer(kind,pane){
    return null;
   },
   _drawStatic:function(){
-   const ctx=this._ctx;if(!ctx)return;
+   const ctx=this._ctx;
+   if(!ctx||!this._meta)return;
    ctx.clearRect(0,0,this._width,this._height);
-   if(!this._data.length)return;
-   if(this._kind==='contour'){this._drawContours(ctx);return}
-   const samples=this._projectSamples().filter(s=>this._value(s.item)!=null);
-   if(!samples.length)return;
+   const rows=this._meta.rows,cols=this._meta.cols;
+   if(!rows||!cols||this._data.length<rows*cols)return;
 
-   // Render at a reduced resolution, then upscale with smoothing for a continuous Windy-like field.
-   const step=7,sw=Math.max(1,Math.ceil(this._width/step)),sh=Math.max(1,Math.ceil(this._height/step));
-   const off=document.createElement('canvas');off.width=sw;off.height=sh;
-   const octx=off.getContext('2d'),image=octx.createImageData(sw,sh),pixels=image.data;
-   const spacing=Math.max(this._width/Math.max(1,(this._meta?.cols||8)-1),this._height/Math.max(1,(this._meta?.rows||6)-1));
-   const maxD2=Math.pow(Math.max(150,spacing*2.1),2);
-   for(let gy=0;gy<sh;gy++){
-    const y=gy*step+step/2;
-    for(let gx=0;gx<sw;gx++){
-     const x=gx*step+step/2;
-     let sum=0,weightSum=0;
-     for(const sample of samples){
-      const dx=x-sample.x,dy=y-sample.y,d2=dx*dx+dy*dy;
-      if(d2>maxD2)continue;
-      const weight=1/Math.pow(d2+100,1.15);
-      sum+=this._value(sample.item)*weight;weightSum+=weight;
-     }
-     if(!weightSum)continue;
-     const value=sum/weightSum,rgb=aiPalette(value),idx=(gy*sw+gx)*4;
-     pixels[idx]=rgb[0];pixels[idx+1]=rgb[1];pixels[idx+2]=rgb[2];
-     pixels[idx+3]=Math.round(100+Math.min(90,value*0.85));
+   const screenRows=[];
+   for(let row=0;row<rows;row++){
+    const projected=[];
+    for(let col=0;col<cols;col++){
+     const item=this._data[row*cols+col];
+     const p=this._map.latLngToContainerPoint([
+      item.point.lat,item.point.displayLon??item.point.lon
+     ]);
+     projected.push({x:p.x,y:p.y,item});
     }
+    screenRows.push(projected);
    }
-   octx.putImageData(image,0,0);
-   ctx.save();
-   ctx.globalAlpha=this._kind==='composite'?0.78:this._kind==='wind'?0.52:0.65;
-   ctx.imageSmoothingEnabled=true;
-   ctx.drawImage(off,0,0,sw,sh,0,0,this._width,this._height);
-   ctx.restore();
-  },
-  _drawContours:function(ctx){
-   const meta=this._meta;if(!meta||!this._data.length)return;
-   const byIndex=new Map(this._data.map(item=>[item.point.row*meta.cols+item.point.col,item]));
-   const values=this._data.map(item=>item.heightM).filter(v=>v!=null&&Number.isFinite(v));
-   if(values.length<4)return;
-   const min=Math.min(...values),max=Math.max(...values);
-   const pressure=Number($('windPressure').value)||250;
-   const interval=pressure>=300?45:pressure<=200?75:60;
-   const first=Math.ceil(min/interval)*interval;
-   const screen=item=>this._map.latLngToContainerPoint([item.point.lat,item.point.displayLon??item.point.lon]);
-   const edge=(p1,v1,p2,v2,level)=>{
-    if((v1<level&&v2>=level)||(v2<level&&v1>=level)){
-     const t=(level-v1)/(v2-v1);
-     return {x:p1.x+(p2.x-p1.x)*t,y:p1.y+(p2.y-p1.y)*t};
-    }
-    return null;
-   };
-   ctx.save();ctx.lineWidth=1.1;ctx.strokeStyle='rgba(245,251,255,0.72)';
-   ctx.fillStyle='rgba(255,255,255,0.9)';ctx.font='10px system-ui';
-   ctx.shadowColor='rgba(3,12,22,0.9)';ctx.shadowBlur=3;
-   let labels=0;
-   for(let level=first;level<=max;level+=interval){
-    for(let row=0;row<meta.rows-1;row++)for(let col=0;col<meta.cols-1;col++){
-     const p00=byIndex.get(row*meta.cols+col),p10=byIndex.get(row*meta.cols+col+1);
-     const p11=byIndex.get((row+1)*meta.cols+col+1),p01=byIndex.get((row+1)*meta.cols+col);
-     if(!p00||!p10||!p11||!p01)continue;
-     const nodes=[p00,p10,p11,p01],vals=nodes.map(n=>n.heightM);
-     if(vals.some(v=>v==null)||level<Math.min(...vals)||level>Math.max(...vals))continue;
-     const pts=nodes.map(screen);
-     const hits=[
-      edge(pts[0],vals[0],pts[1],vals[1],level),
-      edge(pts[1],vals[1],pts[2],vals[2],level),
-      edge(pts[2],vals[2],pts[3],vals[3],level),
-      edge(pts[3],vals[3],pts[0],vals[0],level)
-     ].filter(Boolean);
-     if(hits.length===2||hits.length===4){
-      const pairs=hits.length===2?[[hits[0],hits[1]]]:[[hits[0],hits[1]],[hits[2],hits[3]]];
-      pairs.forEach(pair=>{
-       ctx.beginPath();ctx.moveTo(pair[0].x,pair[0].y);ctx.lineTo(pair[1].x,pair[1].y);ctx.stroke();
-       if(labels<12&&(row*meta.cols+col)%6===0){
-        ctx.fillText(Math.round(level)+' m',(pair[0].x+pair[1].x)/2+3,(pair[0].y+pair[1].y)/2-3);labels++;
-       }
-      });
+
+   // Build rectangular cells from neighbouring forecast grid points.
+   // The target grid spacing is approximately square on the screen.
+   for(let row=0;row<rows;row++){
+    for(let col=0;col<cols;col++){
+     const sample=screenRows[row][col];
+     const item=sample.item;
+     let value=this._value(item);
+     if(value==null||!Number.isFinite(Number(value)))continue;
+     value=Number(value);
+
+     const leftSample=col>0?screenRows[row][col-1]:null;
+     const rightSample=col<cols-1?screenRows[row][col+1]:null;
+     const topSample=row>0?screenRows[row-1][col]:null;
+     const bottomSample=row<rows-1?screenRows[row+1][col]:null;
+
+     const left=leftSample?(leftSample.x+sample.x)/2:
+      sample.x-(rightSample?Math.abs(rightSample.x-sample.x)/2:44);
+     const right=rightSample?(rightSample.x+sample.x)/2:
+      sample.x+(leftSample?Math.abs(sample.x-leftSample.x)/2:44);
+     const top=topSample?(topSample.y+sample.y)/2:
+      sample.y-(bottomSample?Math.abs(bottomSample.y-sample.y)/2:44);
+     const bottom=bottomSample?(bottomSample.y+sample.y)/2:
+      sample.y+(topSample?Math.abs(sample.y-topSample.y)/2:44);
+     const width=Math.max(1,right-left);
+     const height=Math.max(1,bottom-top);
+     if(right<0||left>this._width||bottom<0||top>this._height)continue;
+
+     const paletteValue=this._kind==='wind'?Math.min(100,value/0.9):value;
+     const rgb=aiPalette(paletteValue);
+     const alpha=this._kind==='composite'?0.66:
+      this._kind==='wind'?0.60:0.62;
+
+     ctx.fillStyle='rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+','+alpha+')';
+     ctx.fillRect(left,top,width+0.5,height+0.5);
+
+     // Clearly visible dark grid boundary, then a faint inner highlight.
+     ctx.lineWidth=1.2;
+     ctx.strokeStyle='rgba(5,20,35,0.58)';
+     ctx.strokeRect(left,top,width,height);
+     ctx.lineWidth=0.65;
+     ctx.strokeStyle='rgba(255,255,255,0.32)';
+     ctx.strokeRect(left+1,top+1,Math.max(0,width-2),Math.max(0,height-2));
+
+     // Keep the index legible without overcrowding smaller cells.
+     if(this._kind==='composite'&&width>=42&&height>=32){
+      const label=String(Math.round(value));
+      const cx=left+width/2,cy=top+height/2;
+      ctx.save();
+      ctx.font='600 11px system-ui, sans-serif';
+      ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.lineWidth=2.7;ctx.strokeStyle='rgba(3,17,29,0.72)';
+      ctx.strokeText(label,cx,cy);
+      ctx.fillStyle='rgba(255,255,255,0.96)';
+      ctx.fillText(label,cx,cy);
+      ctx.restore();
      }
     }
    }
-   ctx.restore();
   },
   _initParticles:function(){
    const count=Math.max(180,Math.min(520,Math.round(this._width*this._height/3300)));
@@ -538,7 +528,6 @@ function setCanvasLayerVisibility(){
   [aiCatCanvasLayer,$('showAiCat').checked],
   [aiConvectiveCanvasLayer,$('showAiConvective').checked],
   [aiWindCanvasLayer,$('showWindSpeedHeat').checked],
-  [aiContourCanvasLayer,$('showHeightContours').checked],
   [aiFlowCanvasLayer,$('showWindFlow').checked]
  ];
  pairs.forEach(([layer,visible])=>{
@@ -553,8 +542,9 @@ function buildAiGrid(){
  while(east<=west)east+=360;
  const latSpan=Math.max(0.1,north-south),lonSpan=Math.max(0.1,east-west);
  // Respect the native ~0.25-degree source grid: avoid requesting many duplicate model cells when zoomed in.
- let cols=Math.max(4,Math.min(14,Math.ceil(lonSpan/0.25)+1,Math.round(size.x/85)));
- let rows=Math.max(4,Math.min(9,Math.ceil(latSpan/0.25)+1,Math.round(size.y/70)));
+ // Use roughly 85–95 px screen cells; cap requests to keep model calls reasonable.
+ let cols=Math.max(4,Math.min(14,Math.ceil(lonSpan/0.25)+1,Math.ceil(size.x/90)));
+ let rows=Math.max(4,Math.min(9,Math.ceil(latSpan/0.25)+1,Math.ceil(size.y/90)));
  while(cols*rows>84){if(cols>=rows)cols--;else rows--}
  const points=[];
  for(let r=0;r<rows;r++){
@@ -812,7 +802,7 @@ function drawAiLayers(grid,meta){
  });
  [
   aiCompositeCanvasLayer,aiCatCanvasLayer,aiConvectiveCanvasLayer,
-  aiWindCanvasLayer,aiContourCanvasLayer,aiFlowCanvasLayer
+  aiWindCanvasLayer,aiFlowCanvasLayer
  ].forEach(layer=>layer.setData(grid,meta));
  setCanvasLayerVisibility();
 }
@@ -1225,12 +1215,12 @@ function renderAssessment(){
 $('aiRefreshBtn').onclick=()=>refreshAiGrid(true);
 $('aiClearBtn').onclick=()=>{
  aiGridResults=[];
- [aiCompositeCanvasLayer,aiCatCanvasLayer,aiConvectiveCanvasLayer,aiWindCanvasLayer,aiContourCanvasLayer,aiFlowCanvasLayer]
+ [aiCompositeCanvasLayer,aiCatCanvasLayer,aiConvectiveCanvasLayer,aiWindCanvasLayer,aiFlowCanvasLayer]
   .forEach(layer=>layer.setData([],null));
  aiCatLayer.clearLayers();aiConvectiveLayer.clearLayers();renderAiCesiumLayers();
  $('aiSummary').textContent='AI 기상 레이어를 지웠습니다.';
 };
-['showAiRiskHeat','showAiCat','showAiConvective','showWindSpeedHeat','showHeightContours','showWindFlow'].forEach(id=>{
+['showAiRiskHeat','showAiCat','showAiConvective','showWindSpeedHeat','showWindFlow'].forEach(id=>{
  $(id).onchange=()=>{setCanvasLayerVisibility();renderAiCesiumLayers()};
 });
 $('aiModel').onchange=()=>refreshAiGrid(true);
