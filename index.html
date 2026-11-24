@@ -270,6 +270,12 @@ function blendModelRisk(a,b,weightA=0.6){
  if(b==null)return a;
  return Math.round(a*weightA+b*(1-weightA));
 }
+function blendModelValue(a,b,weightA=0.6){
+ if(a==null&&b==null)return null;
+ if(a==null)return b;
+ if(b==null)return a;
+ return a*weightA+b*(1-weightA);
+}
 function buildAiGrid(){
  const bounds=map.getBounds(),size=map.getSize();
  const north=Math.min(85,bounds.getNorth()),south=Math.max(-85,bounds.getSouth());
