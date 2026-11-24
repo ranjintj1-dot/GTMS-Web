@@ -543,8 +543,8 @@ function buildAiGrid(){
  const latSpan=Math.max(0.1,north-south),lonSpan=Math.max(0.1,east-west);
  // Respect the native ~0.25-degree source grid: avoid requesting many duplicate model cells when zoomed in.
  // Use roughly 85–95 px screen cells; cap requests to keep model calls reasonable.
- let cols=Math.max(4,Math.min(14,Math.ceil(lonSpan/0.25)+1,Math.ceil(size.x/90)));
- let rows=Math.max(4,Math.min(9,Math.ceil(latSpan/0.25)+1,Math.ceil(size.y/90)));
+ let cols=Math.max(4,Math.min(14,Math.ceil(lonSpan/0.25)+1,Math.ceil(size.x/80)));
+ let rows=Math.max(4,Math.min(9,Math.ceil(latSpan/0.25)+1,Math.ceil(size.y/80)));
  while(cols*rows>84){if(cols>=rows)cols--;else rows--}
  const points=[];
  for(let r=0;r<rows;r++){
@@ -675,27 +675,43 @@ function renderAiCesiumLayers(){
  if(!cesiumViewer)return;
  aiCesiumEntities.forEach(entity=>cesiumViewer.entities.remove(entity));
  aiCesiumEntities=[];
+ const meta=aiGridMeta;
+ const dLat=meta?Math.abs(meta.north-meta.south)/Math.max(1,meta.rows-1):0.5;
+ const dLon=meta?Math.abs(meta.east-meta.west)/Math.max(1,meta.cols-1):0.5;
  aiGridResults.forEach(item=>{
-  const {lat,lon}=item.point,radius=item.radiusM||90000;
+  const {lat}=item.point;
+  const centerLon=item.point.displayLon??item.point.lon;
+  const west=centerLon-dLon/2,east=centerLon+dLon/2;
+  const north=lat+dLat/2,south=lat-dLat/2;
   const layers=[
-   [item.combinedIndex,$('showAiRiskHeat').checked,1],
-   [item.mapCatIndex,$('showAiCat').checked,1],
-   [item.mapConvectiveIndex,$('showAiConvective').checked,0.76]
+   [item.combinedIndex,$('showAiRiskHeat').checked],
+   [item.mapCatIndex,$('showAiCat').checked],
+   [item.mapConvectiveIndex,$('showAiConvective').checked]
   ];
-  layers.forEach(([index,visible,scale])=>{
+  layers.forEach(([index,visible])=>{
    if(index==null||!visible)return;
-   const color=Cesium.Color.fromCssColorString(aiRiskColor(index)).withAlpha(0.17);
+   const base=Cesium.Color.fromCssColorString(aiRiskColor(index));
+   const material=base.withAlpha(0.40);
+   const rect=Cesium.Rectangle.fromDegrees(west,south,east,north);
    aiCesiumEntities.push(cesiumViewer.entities.add({
-    position:Cesium.Cartesian3.fromDegrees(lon,lat,9000),
-    ellipse:{semiMajorAxis:radius*scale,semiMinorAxis:radius*scale,material:color,outline:false,height:9000}
+    rectangle:{
+     coordinates:rect,
+     material,
+     height:9000,
+     outline:true,
+     outlineColor:Cesium.Color.fromCssColorString('#102b3c').withAlpha(0.75)
+    }
    }));
   });
   if($('showWindFlow').checked&&Number.isFinite(item.flowU)&&Number.isFinite(item.flowV)){
-   const vectorLength=radius*0.75;
+   const vectorLength=Math.min(dLat*0.45,0.45);
    const lat2=lat+item.flowV*vectorLength/111320;
-   const lon2=lon+item.flowU*vectorLength/(111320*Math.max(0.15,Math.cos(lat*Math.PI/180)));
+   const lon2=centerLon+item.flowU*vectorLength/(111320*Math.max(0.15,Math.cos(lat*Math.PI/180)));
    aiCesiumEntities.push(cesiumViewer.entities.add({
-    polyline:{positions:Cesium.Cartesian3.fromDegreesArrayHeights([lon,lat,9800,lon2,lat2,9800]),width:2,material:Cesium.Color.WHITE.withAlpha(0.8)}
+    polyline:{
+     positions:Cesium.Cartesian3.fromDegreesArrayHeights([centerLon,lat,9800,lon2,lat2,9800]),
+     width:2,material:Cesium.Color.WHITE.withAlpha(0.88)
+    }
    }));
   }
  });
