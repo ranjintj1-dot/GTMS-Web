@@ -65,11 +65,11 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
  </section>
  <section class="panel">
   <h2>WEATHER LAYERS</h2>
-  <label><input type="checkbox" id="showSigmet" checked disabled> SIGMET 영역 (자동 지도표시 제한)</label>
-  <label><input type="checkbox" id="showPirep" checked disabled> PIREP / AIREP 보고 (자동 지도표시 제한)</label>
+  <label><input type="checkbox" id="showSigmet" checked> SIGMET 영역</label>
+  <label><input type="checkbox" id="showPirep" checked> PIREP / AIREP 보고</label>
   <label><input type="checkbox" id="showRisk" checked> 항로 위험도 구간</label>
   <label><input type="checkbox" id="showRoute" checked> 비행 항적</label>
-  <div class="hint">NOAA API는 CORS 정책상 정적 웹페이지에서 직접 호출할 수 없습니다. 공식 자료 링크는 우측 데이터 표에 제공합니다.</div>
+  <div class="hint">NOAA SIGMET / PIREP은 Cloudflare Worker 중계로 수신합니다. Worker 주소는 noaa-proxy-config.js에 설정합니다.</div>
  </section>
  <section class="panel">
   <h2>ALTITUDE FILTER</h2>
@@ -79,7 +79,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
  </section>
  <section class="panel">
   <h2>DATA SOURCES / STATUS</h2><div id="feedStatus">브라우저 외부 기상자료 연결 준비 중…</div>
-  <div class="hint">Open-Meteo / ECMWF IFS 직접 조회 · OpenStreetMap</div>
+  <div class="hint">NOAA Aviation Weather API · Cloudflare Worker · Open-Meteo ECMWF IFS · OpenStreetMap</div>
  </section>
 </aside>
 <main>
@@ -110,7 +110,9 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
  </div>
 </main>
 </div>
+<script src="./noaa-proxy-config.js"></script>
 <script>
+const NOAA_PROXY_BASE=String(window.GTMS_NOAA_PROXY_URL||'').replace(/\/+$/,'');
 const $=id=>document.getElementById(id);
 let map, routeLayer, riskLayer, sigmetLayer, pirepLayer, cesiumViewer, currentRoute=[], sigmets=[], pireps=[], routeAssessments=[];
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -171,34 +173,117 @@ $('showRoute').onchange=e=>e.target.checked?routeLayer.addTo(map):map.removeLaye
 $('showSigmet').onchange=e=>e.target.checked?sigmetLayer.addTo(map):map.removeLayer(sigmetLayer);
 $('showPirep').onchange=e=>e.target.checked?pirepLayer.addTo(map):map.removeLayer(pirepLayer);
 $('showRisk').onchange=()=>renderAssessment();
+function featureDescription(feature){
+ const p=feature.properties||{};
+ return [
+  p.hazard,p.phenom,p.sigmetType,p.type,p.raw,p.rawOb,p.remarks,
+  p.validTimeFrom?'유효시각 '+p.validTimeFrom:'',
+  p.validTimeTo?'종료 '+p.validTimeTo:''
+ ].filter(Boolean).map(esc).join('<br>')||'NOAA SIGMET';
+}
 function geomToLayers(feature,style){
  const g=feature.geometry;if(!g)return;
- if(g.type==='Polygon')L.polygon(g.coordinates[0].map(c=>[c[1],c[0]]),style).addTo(sigmetLayer);
- if(g.type==='MultiPolygon')g.coordinates.forEach(poly=>L.polygon(poly[0].map(c=>[c[1],c[0]]),style).addTo(sigmetLayer));
- if(g.type==='LineString')L.polyline(g.coordinates.map(c=>[c[1],c[0]]),style).addTo(sigmetLayer);
+ const popup=featureDescription(feature);
+ const addPolygon=coords=>L.polygon(
+  coords.map(r=>r.map(c=>[c[1],c[0]])),
+  style
+ ).bindPopup('<b>SIGMET</b><br>'+popup).addTo(sigmetLayer);
+ const addLine=coords=>L.polyline(
+  coords.map(c=>[c[1],c[0]]),
+  style
+ ).bindPopup('<b>SIGMET</b><br>'+popup).addTo(sigmetLayer);
+ if(g.type==='Polygon')addPolygon(g.coordinates);
+ else if(g.type==='MultiPolygon')g.coordinates.forEach(addPolygon);
+ else if(g.type==='LineString')addLine(g.coordinates);
+ else if(g.type==='MultiLineString')g.coordinates.forEach(addLine);
+ else if(g.type==='GeometryCollection')g.geometries.forEach(geometry=>geomToLayers({...feature,geometry},style));
 }
-function extractFeatures(data){if(Array.isArray(data))return data.map(x=>x.type==='Feature'?x:{type:'Feature',geometry:x.geometry||null,properties:x});return data?.features||[]}
+function extractFeatures(data){
+ if(Array.isArray(data))return data.map(x=>x.type==='Feature'?x:{type:'Feature',geometry:x.geometry||null,properties:x.properties||x});
+ if(data?.type==='Feature')return [data];
+ return data?.features||[];
+}
+function drawPirep(feature){
+ const props=feature.properties||{};
+ const geometry=feature.geometry||{};
+ let lat,lon;
+ if(geometry.type==='Point'){lon=Number(geometry.coordinates?.[0]);lat=Number(geometry.coordinates?.[1]);}
+ else {lat=Number(props.lat??props.latitude);lon=Number(props.lon??props.longitude);}
+ if(!Number.isFinite(lat)||!Number.isFinite(lon)||Math.abs(lat)>90||Math.abs(lon)>180)return;
+ const raw=JSON.stringify(props).toUpperCase();
+ const level=/EXTREME|SEV(ERE)?/.test(raw)?4:/MOD(ERATE)?/.test(raw)?2:/LGT|LIGHT/.test(raw)?1:0;
+ const color=riskColor(level);
+ const flightLevel=props.altitude??props.fltLvl??props.flightLevel??props.fl??'미상';
+ const time=props.obsTime??props.time??props.validTime??props.reportTime??'시간 미상';
+ const report=props.rawOb??props.raw??props.report??props.turbulence??props.remarks??'PIREP / AIREP';
+ L.circleMarker([lat,lon],{
+  radius:level>=3?8:6,color:'#ffffff',weight:1.5,
+  fillColor:color,fillOpacity:.95
+ }).bindPopup(
+  '<b>PIREP / AIREP</b><br>'+
+  '위험도: '+riskLabel(level)+'<br>'+
+  '고도: '+esc(flightLevel)+'<br>'+
+  '보고시각: '+esc(time)+'<br>'+
+  esc(report)
+ ).addTo(pirepLayer);
+}
 async function refreshFeeds(){
  $('refreshBtn').disabled=true;
  sigmets=[];pireps=[];
  sigmetLayer.clearLayers();pirepLayer.clearLayers();
- $('kpiSigmet').textContent='웹 제한';
- $('kpiPirep').textContent='웹 제한';
+
  const awc='https://aviationweather.gov/api/data';
- $('feedTable').innerHTML=`
-  <table>
-   <tr><th>자료</th><th>상태</th><th>조회</th></tr>
-   <tr><td>NOAA SIGMET</td><td>브라우저 직접조회 제한</td><td><a href="${awc}/airsigmet?format=geojson" target="_blank" rel="noopener">공식 GeoJSON 열기</a></td></tr>
-   <tr><td>NOAA PIREP</td><td>브라우저 직접조회 제한</td><td><a href="${awc}/aircraftreport?format=json&age=6" target="_blank" rel="noopener">공식 JSON 열기</a></td></tr>
-   <tr><td>Open-Meteo / ECMWF IFS</td><td>항로 분석 시 브라우저에서 직접 조회</td><td><a href="https://open-meteo.com/en/docs/ecmwf-api" target="_blank" rel="noopener">API 자료 안내</a></td></tr>
-  </table>`;
- setFeed(
-  '<span style="color:#fcd34d">● NOAA SIGMET / PIREP: 브라우저 CORS 정책으로 자동 지도표시는 제한됩니다.</span><br>'+
-  '<span style="color:#86efac">● Open-Meteo ECMWF IFS: 항로 분석 시 브라우저에서 직접 조회합니다.</span><br>'+
-  'NOAA 공식 자료는 우측 링크에서 확인할 수 있습니다.'
- );
- $('lastUpdate').textContent='자료 상태 확인: '+new Date().toISOString().slice(11,19)+' UTC';
+ const proxyReady=!!NOAA_PROXY_BASE;
+ const feedRows=[];
+ const statuses=[];
+
+ if(proxyReady){
+  const requests=await Promise.allSettled([
+   getJSON(NOAA_PROXY_BASE+'/api/sigmets'),
+   getJSON(NOAA_PROXY_BASE+'/api/pireps')
+  ]);
+  if(requests[0].status==='fulfilled'){
+   sigmets=extractFeatures(requests[0].value);
+   sigmets.forEach(f=>geomToLayers(f,{
+    color:'#fb923c',weight:2,opacity:.9,
+    fillColor:'#fb923c',fillOpacity:.18
+   }));
+   $('kpiSigmet').textContent=sigmets.length;
+   feedRows.push('<tr><td>NOAA SIGMET</td><td style="color:#86efac">수신 '+sigmets.length+'건</td><td><a href="'+awc+'/sigmet?format=geojson" target="_blank" rel="noopener">공식 자료</a></td></tr>');
+   statuses.push('<span style="color:#86efac">● SIGMET 수신 '+sigmets.length+'건</span>');
+  }else{
+   $('kpiSigmet').textContent='오류';
+   feedRows.push('<tr><td>NOAA SIGMET</td><td style="color:#fca5a5">조회 실패</td><td>'+esc(requests[0].reason?.message||'오류')+'</td></tr>');
+   statuses.push('<span style="color:#fca5a5">● SIGMET 조회 실패: '+esc(requests[0].reason?.message||'오류')+'</span>');
+  }
+  if(requests[1].status==='fulfilled'){
+   pireps=extractFeatures(requests[1].value);
+   pireps.forEach(drawPirep);
+   $('kpiPirep').textContent=pireps.length;
+   feedRows.push('<tr><td>NOAA PIREP / AIREP</td><td style="color:#86efac">수신 '+pireps.length+'건</td><td><a href="'+awc+'/pirep/" target="_blank" rel="noopener">공식 자료</a></td></tr>');
+   statuses.push('<span style="color:#86efac">● PIREP / AIREP 수신 '+pireps.length+'건</span>');
+  }else{
+   $('kpiPirep').textContent='오류';
+   feedRows.push('<tr><td>NOAA PIREP / AIREP</td><td style="color:#fca5a5">조회 실패</td><td>'+esc(requests[1].reason?.message||'오류')+'</td></tr>');
+   statuses.push('<span style="color:#fca5a5">● PIREP 조회 실패: '+esc(requests[1].reason?.message||'오류')+'</span>');
+  }
+ }else{
+  $('kpiSigmet').textContent='설정 필요';
+  $('kpiPirep').textContent='설정 필요';
+  feedRows.push('<tr><td>NOAA SIGMET</td><td>Cloudflare Worker 연결 대기</td><td><a href="'+awc+'/sigmet?format=geojson" target="_blank" rel="noopener">공식 자료</a></td></tr>');
+  feedRows.push('<tr><td>NOAA PIREP / AIREP</td><td>Cloudflare Worker 연결 대기</td><td><a href="'+awc+'/pirep/" target="_blank" rel="noopener">공식 자료</a></td></tr>');
+  statuses.push('<span style="color:#fcd34d">● Cloudflare Worker 주소 설정 대기</span>');
+ }
+
+ feedRows.push('<tr><td>Open-Meteo / ECMWF IFS</td><td>항로 분석 시 직접 조회</td><td><a href="https://open-meteo.com/en/docs/ecmwf-api" target="_blank" rel="noopener">자료 안내</a></td></tr>');
+ $('feedTable').innerHTML='<table><tr><th>자료</th><th>상태</th><th>조회</th></tr>'+feedRows.join('')+'</table>';
+ statuses.push('<span style="color:#86efac">● Open-Meteo ECMWF IFS: 항로 분석 시 브라우저 직접 조회</span>');
+ statuses.push('<span style="color:#9bb5c7">PIREP/AIREP 자료 범위는 주로 미국·북대서양이며 전 세계를 완전히 포괄하지 않습니다.</span>');
+ setFeed(statuses.join('<br>'));
+ $('lastUpdate').textContent='마지막 갱신: '+new Date().toISOString().slice(11,19)+' UTC';
  $('refreshBtn').disabled=false;
+ if($('showSigmet').checked)sigmetLayer.addTo(map);else map.removeLayer(sigmetLayer);
+ if($('showPirep').checked)pirepLayer.addTo(map);else map.removeLayer(pirepLayer);
 }
 function interpolate(a,b,t){return {lat:a.lat+(b.lat-a.lat)*t,lon:a.lon+(b.lon-a.lon)*t}}
 async function fetchDirectForecast(point,altFt,hours){
