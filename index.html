@@ -132,7 +132,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
 const NOAA_PROXY_BASE=String(window.GTMS_NOAA_PROXY_URL||'').replace(/\/+$/,'');
 const $=id=>document.getElementById(id);
 let map, routeLayer, riskLayer, sigmetLayer, pirepLayer, aiCatLayer, aiConvectiveLayer, cesiumViewer, currentRoute=[], sigmets=[], pireps=[], routeAssessments=[];
-let aiGridResults=[], aiRefreshTimer=null, aiLastRefreshAt=0, aiBusy=false;
+let aiGridResults=[], aiRefreshTimer=null, aiLastRefreshAt=0, aiBusy=false, aiCesiumEntities=[];
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function utcClock(){ $('clock').textContent='UTC '+new Date().toISOString().slice(11,16); }
 setInterval(utcClock,1000);utcClock();
@@ -287,6 +287,7 @@ function drawAiLayers(grid,meta){
   const lat=item.point.lat,lon=item.point.lon;
   const cos=Math.max(0.15,Math.cos(lat*Math.PI/180));
   const radius=Math.max(35000,Math.min(420000,111320*0.38*Math.max(latStep,lonStep*cos)));
+  item.radiusM=radius;
   if(item.catIndex!=null && $('showAiCat').checked){
    const color=aiRiskColor(item.catIndex);
    L.circle([lat,lon],{radius,color,weight:1,opacity:.85,fillColor:color,fillOpacity:item.catIndex>=50?.30:.15})
@@ -370,6 +371,28 @@ async function refreshAiGrid(force=false){
   aiBusy=false;
   if(button)button.disabled=false;
  }
+}
+function renderAiCesiumLayers(){
+ if(!cesiumViewer)return;
+ aiCesiumEntities.forEach(entity=>cesiumViewer.entities.remove(entity));
+ aiCesiumEntities=[];
+ aiGridResults.forEach(item=>{
+  const {lat,lon}=item.point;
+  if(item.catIndex!=null && $('showAiCat').checked){
+   const color=Cesium.Color.fromCssColorString(aiRiskColor(item.catIndex)).withAlpha(item.catIndex>=50?0.22:0.12);
+   aiCesiumEntities.push(cesiumViewer.entities.add({
+    position:Cesium.Cartesian3.fromDegrees(lon,lat,9000),
+    ellipse:{semiMajorAxis:item.radiusM||90000,semiMinorAxis:item.radiusM||90000,material:color,outline:true,outlineColor:color.withAlpha(0.85),height:9000}
+   }));
+  }
+  if(item.convectiveIndex!=null && $('showAiConvective').checked){
+   const color=Cesium.Color.fromCssColorString(aiRiskColor(item.convectiveIndex)).withAlpha(item.convectiveIndex>=50?0.2:0.1);
+   aiCesiumEntities.push(cesiumViewer.entities.add({
+    position:Cesium.Cartesian3.fromDegrees(lon,lat,10000),
+    ellipse:{semiMajorAxis:(item.radiusM||90000)*0.76,semiMinorAxis:(item.radiusM||90000)*0.76,material:color,outline:true,outlineColor:color.withAlpha(0.8),height:10000}
+   }));
+  }
+ });
 }
 function scheduleAiRefresh(){
  if(!$('aiAutoRefresh')?.checked)return;
@@ -665,9 +688,11 @@ $('aiClearBtn').onclick=()=>{
 };
 $('showAiCat').onchange=()=>{
  if($('showAiCat').checked)aiCatLayer.addTo(map);else map.removeLayer(aiCatLayer);
+ renderAiCesiumLayers();
 };
 $('showAiConvective').onchange=()=>{
  if($('showAiConvective').checked)aiConvectiveLayer.addTo(map);else map.removeLayer(aiConvectiveLayer);
+ renderAiCesiumLayers();
 };
 $('aiModel').onchange=()=>refreshAiGrid(true);
 $('horizon').onchange=()=>refreshAiGrid(true);
