@@ -1212,7 +1212,16 @@ $('map2d').onclick=()=>{ $('map').style.display='block';$('cesiumMap').style.dis
 $('map3d').onclick=()=>{
  $('map').style.display='none';$('cesiumMap').style.display='block';$('map3d').classList.add('active');$('map2d').classList.remove('active');
  if(!cesiumViewer){try{cesiumViewer=new Cesium.Viewer('cesiumMap',{animation:false,timeline:false,baseLayerPicker:true,geocoder:false,homeButton:true,sceneModePicker:true,navigationHelpButton:false,infoBox:false,selectionIndicator:false});cesiumViewer.camera.flyHome(0); }catch(e){alert('3D 지도를 초기화하지 못했습니다: '+e.message)}}
- if(cesiumViewer&&currentRoute.length>1){const pts=currentRoute.map(p=>Cesium.Cartesian3.fromDegrees(p.lon,p.lat,(p.alt_ft||35000)*0.3048));cesiumViewer.entities.removeAll();cesiumViewer.entities.add({polyline:{positions:pts,width:4,material:Cesium.Color.CYAN}});pts.forEach((pt,i)=>cesiumViewer.entities.add({position:pt,point:{pixelSize:i===0||i===pts.length-1?9:5,color:Cesium.Color.CYAN}}));cesiumViewer.zoomTo(cesiumViewer.entities)}
+ if(cesiumViewer){
+  cesiumViewer.entities.removeAll();aiCesiumEntities=[];
+  if(currentRoute.length>1){
+   const pts=currentRoute.map(p=>Cesium.Cartesian3.fromDegrees(p.lon,p.lat,(p.alt_ft||35000)*0.3048));
+   cesiumViewer.entities.add({polyline:{positions:pts,width:4,material:Cesium.Color.CYAN}});
+   pts.forEach((pt,i)=>cesiumViewer.entities.add({position:pt,point:{pixelSize:i===0||i===pts.length-1?9:5,color:Cesium.Color.CYAN}}));
+  }
+  renderAiCesiumLayers();
+  if(cesiumViewer.entities.values.length)cesiumViewer.zoomTo(cesiumViewer.entities);
+ }
 };
 refreshFeeds();
 setTimeout(()=>refreshAiGrid(true),2500);
