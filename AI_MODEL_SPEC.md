@@ -49,13 +49,19 @@ Hybrid mode blends model indices:
 
 If one model is unavailable, the other model's index is used and the status panel identifies that the result came from a fallback model.
 
-## 3. Display and refresh behaviour
+## 3. Windy-style visualization and time selection
 
-- The analysis grid is generated from the visible Leaflet map bounds.
-- Each coordinate is queried through Open-Meteo's multi-location ECMWF API.
-- Separate Leaflet layers are used for CAT and convective risk; Cesium ellipses are also created in 3D Globe mode.
-- Map move/zoom schedules a new query. The automatic polling interval is 15 minutes.
-- This is not a live turbulence sensor feed. AIFS forecasts have six-hourly time steps and are updated every six hours. IFS 0.25° has three-hourly and six-hourly forecast steps and is updated every six hours. A 15-minute screen refresh may therefore display the same model run repeatedly.
+- The visible Leaflet map bounds are sampled into a multi-location analysis grid, capped at 84 points per model request.
+- Forecast fields are fetched from Open-Meteo's ECMWF endpoint for AIFS and IFS 0.25° model selections.
+- The user selects a forecast lead time and a pressure level (300, 250 or 200 hPa) for the map's wind field.
+- The composite risk layer is rendered as an interpolated HTML canvas colour field. Separate CAT, convective and wind-speed canvas layers are available.
+- Animated white particles are advected using the selected pressure-level U/V wind components; these are visual flow tracers, not aircraft trajectories.
+- White contour lines are interpolated from geopotential height at the selected pressure level. They are height contours, not sea-level pressure isobars.
+- 2D Leaflet and 3D Cesium views have separate renderers. The 3D view approximates the continuous field with translucent grid-cell ellipses and wind-vector lines.
+- Panning or zooming schedules a new grid query. The automatic polling interval is 15 minutes, but the underlying models update less frequently.
+- This is not a live turbulence sensor feed. AIFS Single provides 6-hourly forecast time steps and is updated every six hours. Open-data IFS 0.25° has 3-hourly and 6-hourly output and is updated every six hours. A 15-minute screen refresh may therefore display the same model run repeatedly.
+
+The rendered colour field is an interpolation of forecast grid-point values for visual continuity; it does not add physical forecast resolution beyond the source model's approximately 0.25° grid (roughly 25–28 km).
 
 ## 4. Experimental risk categories
 
