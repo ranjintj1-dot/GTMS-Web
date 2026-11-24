@@ -515,8 +515,8 @@ function buildAiGrid(){
  const north=Math.min(85,bounds.getNorth()),south=Math.max(-85,bounds.getSouth());
  let west=bounds.getWest(),east=bounds.getEast();
  while(east<=west)east+=360;
- let cols=Math.max(5,Math.min(12,Math.round(size.x/145)));
- let rows=Math.max(4,Math.min(9,Math.round(size.y/95)));
+ let cols=Math.max(6,Math.min(14,Math.round(size.x/125)));
+ let rows=Math.max(5,Math.min(9,Math.round(size.y/80)));
  while(cols*rows>84){if(cols>=rows)cols--;else rows--}
  const points=[];
  for(let r=0;r<rows;r++){
@@ -796,7 +796,7 @@ async function refreshAiGrid(force=false){
  aiBusy=true;aiLastRefreshAt=now;
  const button=$('aiRefreshBtn');
  if(button)button.disabled=true;
- $('aiSummary').textContent='현재 지도 범위의 ECMWF AI/수치예보 격자자료를 조회하고 위험지수를 계산하는 중…';
+ $('aiSummary').textContent='현재 화면의 예보격자와 선택 고도 바람장을 불러오는 중…';
  try{
   const meta=buildAiGrid(),points=meta.points,horizon=Number($('horizon').value)||24;
   const chosen=$('aiModel').value;
@@ -804,12 +804,13 @@ async function refreshAiGrid(force=false){
   const pressure=Number($('windPressure').value)||250;
   let aifsRows=null,ifsRows=null,aifsError=null,ifsError=null;
   if(chosen==='aifs'||chosen==='hybrid'){
-   try{aifsRows=await fetchEcmwfGrid('ecmwf_aifs025',points,horizon)}catch(e){aifsError=e}
+   try{aifsRows=await fetchEcmwfGrid('ecmwf_aifs025_single',points,horizon)}catch(e){aifsError=e}
   }
   if(chosen==='ifs'||chosen==='hybrid'){
    try{ifsRows=await fetchEcmwfGrid('ecmwf_ifs025',points,horizon)}catch(e){ifsError=e}
   }
-  if(!aifsRows&&!ifsRows)throw new Error('ECMWF 모델 응답 실패. AIFS: '+(aifsError?.message||'미선택')+' / IFS: '+(ifsError?.message||'미선택'));
+  if(!aifsRows&&!ifsRows)throw new Error('ECMWF 모델 자료 수신 실패. AIFS: '+(aifsError?.message||'조회 안 함')+' / IFS: '+(ifsError?.message||'조회 안 함'));
+
   aiGridResults=points.map((point,index)=>{
    const a=aifsRows?evaluateModelPoint(aifsRows[index],horizon,targetLead,pressure):null;
    const b=ifsRows?evaluateModelPoint(ifsRows[index],horizon,targetLead,pressure):null;
@@ -820,40 +821,43 @@ async function refreshAiGrid(force=false){
    const selectedA=a?.selected,selectedB=b?.selected;
    const mapCatIndex=blendModelRisk(selectedA?.catIndex??null,selectedB?.catIndex??null);
    const mapConvectiveIndex=blendModelRisk(selectedA?.convectiveIndex??null,selectedB?.convectiveIndex??null);
-   const sourceFlow=selectedA?.flow||selectedB?.flow;
    const flowU=blendModelValue(selectedA?.flow?.u??null,selectedB?.flow?.u??null);
    const flowV=blendModelValue(selectedA?.flow?.v??null,selectedB?.flow?.v??null);
    const flowSpeed=(flowU==null||flowV==null)?null:Math.hypot(flowU,flowV);
    const heightM=blendModelValue(selectedA?.flow?.heightM??null,selectedB?.flow?.heightM??null);
+   const selectedTime=selectedA?.time||selectedB?.time||'';
    return {
     point,catIndex,convectiveIndex,mapCatIndex,mapConvectiveIndex,
+    combinedIndex:mapCatIndex==null?mapConvectiveIndex:
+     mapConvectiveIndex==null?mapCatIndex:Math.max(mapCatIndex,mapConvectiveIndex),
     catTime:catSource?.time,convTime:convSource?.time,
     shearMsKm:selectedA?.shearMsKm??selectedB?.shearMsKm??catSource?.shearMsKm,
     richardson:selectedA?.richardson??selectedB?.richardson??catSource?.richardson,
     cape:selectedA?.cape??selectedB?.cape??convSource?.cape,
     precipitation:selectedA?.precipitation??selectedB?.precipitation??convSource?.precipitation,
     omega:selectedA?.omega??selectedB?.omega??convSource?.omega,
-    flowU,flowV,flowSpeed,heightM,
-    flowTime:sourceFlow?.time||selectedA?.time||selectedB?.time,
+    flowU,flowV,flowSpeed,heightM,flowTime:selectedTime,
     aifsCat:a?.cat?.index??null,ifsCat:b?.cat?.index??null
    };
   });
+
   drawAiLayers(aiGridResults,meta);
   renderAiCesiumLayers();
-  const valid=aiGridResults.filter(p=>p.catIndex!=null||p.convectiveIndex!=null);
-  const maxCat=Math.max(0,...valid.map(p=>p.catIndex??0));
-  const maxConv=Math.max(0,...valid.map(p=>p.convectiveIndex??0));
-  const modelLabel=chosen==='hybrid'?(aifsRows&&ifsRows?'AIFS AI + IFS':'단일 모델 대체'):chosen.toUpperCase();
-  const validTime=aiGridResults.find(p=>p.flowTime)?.flowTime||valid[0]?.catTime||valid[0]?.convTime||'';
+  const valid=aiGridResults.filter(p=>p.mapCatIndex!=null||p.mapConvectiveIndex!=null||p.flowSpeed!=null);
+  const maxCat=Math.max(0,...valid.map(p=>p.mapCatIndex??0));
+  const maxConv=Math.max(0,...valid.map(p=>p.mapConvectiveIndex??0));
+  const modelLabel=chosen==='hybrid'?(aifsRows&&ifsRows?'AIFS AI + IFS':'단일 모델 대체'):chosen==='aifs'?'ECMWF AIFS AI':'ECMWF IFS';
+  const validTime=aiGridResults.find(p=>p.flowTime)?.flowTime||'';
   $('aiSummary').innerHTML=
-   '<span style="color:#86efac">● AI 기상격자 분석 완료</span><br>'+
+   '<span style="color:#86efac">● Windy형 AI 기상장 표출 완료</span><br>'+
    '모델: '+esc(modelLabel)+' · 격자: '+valid.length+'/'+points.length+'<br>'+
-   '표시 예보: '+(targetLead===0?'가장 가까운 예보':'+'+targetLead+'시간')+' · 바람장 '+pressure+' hPa<br>'+
+   '예보시각: '+(targetLead===0?'가장 가까운 예보':'+'+targetLead+'시간')+
+   ' · 바람장: '+pressure+' hPa<br>'+
    '최고 CAT 지수: <b>'+maxCat+'/100 ('+aiRiskLabel(maxCat)+')</b><br>'+
    '최고 대류성 지수: <b>'+maxConv+'/100 ('+aiRiskLabel(maxConv)+')</b><br>'+
-   '예보 유효시각: '+esc(validTime)+' UTC · 갱신 확인: '+new Date().toISOString().slice(11,19)+' UTC'+
-   ((aifsError||ifsError)?'<br><span style="color:#fcd34d">일부 모델 조회 실패: '+esc((aifsError||ifsError).message)+'</span>':'');
-  $('lastUpdate').textContent='AI 예보 분석: '+new Date().toISOString().slice(11,19)+' UTC';
+   '예보 유효시각: '+esc(validTime||'-')+' UTC · 화면 갱신: '+new Date().toISOString().slice(11,19)+' UTC'+
+   ((aifsError||ifsError)?'<br><span style="color:#fcd34d">한 모델 조회 실패, 다른 모델 결과로 대체: '+esc((aifsError||ifsError).message)+'</span>':'');
+  $('lastUpdate').textContent='AI 예보 유효: '+(validTime||'--')+' UTC';
  }catch(error){
   $('aiSummary').innerHTML='<span style="color:#fca5a5">● AI 위험기상 조회 실패: '+esc(error.message)+'</span>';
  }finally{
