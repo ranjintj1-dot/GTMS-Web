@@ -635,7 +635,7 @@ function createAiCanvasLayer(kind,pane){
   _projectSamples:function(){
    if(!this._map)return [];
    return this._data.map(item=>{
-    const p=this._map.latLngToContainerPoint([item.point.lat,item.point.lon]);
+    const p=this._map.latLngToContainerPoint([item.point.lat,item.point.displayLon??item.point.lon]);
     return {x:p.x,y:p.y,item};
    }).filter(s=>Number.isFinite(s.x)&&Number.isFinite(s.y));
   },
@@ -688,7 +688,7 @@ function createAiCanvasLayer(kind,pane){
    const pressure=Number($('windPressure').value)||250;
    const interval=pressure>=300?45:pressure<=200?75:60;
    const first=Math.ceil(min/interval)*interval;
-   const screen=item=>this._map.latLngToContainerPoint([item.point.lat,item.point.lon]);
+   const screen=item=>this._map.latLngToContainerPoint([item.point.lat,item.point.displayLon??item.point.lon]);
    const edge=(p1,v1,p2,v2,level)=>{
     if((v1<level&&v2>=level)||(v2<level&&v1>=level)){
      const t=(level-v1)/(v2-v1);
