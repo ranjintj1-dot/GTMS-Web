@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GTMS · Global Turbulence Monitoring System</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cesium.com/downloads/cesiumjs/releases/1.126/Build/Cesium/Cesium.js"></script>
+<link href="https://cesium.com/downloads/cesiumjs/releases/1.126/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+:root{--bg:#071827;--panel:#0d2639;--panel2:#12334a;--line:#28506a;--text:#e8f3fb;--muted:#9bb5c7;--cyan:#38bdf8;--orange:#fb923c;--red:#ff5263;--green:#34d399;--yellow:#facc15}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Malgun Gothic",sans-serif}
+header{min-height:64px;padding:12px 18px;display:flex;align-items:center;justify-content:space-between;gap:12px;background:#0b2235;border-bottom:1px solid var(--line);flex-wrap:wrap}
+h1{font-size:19px;margin:0;letter-spacing:.4px}header small{color:var(--muted)}.brand{display:flex;align-items:center;gap:12px}.mark{width:34px;height:34px;border-radius:9px;background:linear-gradient(145deg,#38bdf8,#0e7490);display:grid;place-items:center;font-weight:900;color:#041521}
+.top-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.status{font-size:12px;color:#9bb5c7}.pill{border:1px solid var(--line);border-radius:99px;padding:5px 9px;font-size:11px;color:#b8d3e5}
+.layout{display:grid;grid-template-columns:330px minmax(0,1fr);min-height:calc(100vh - 64px)}aside{padding:12px;background:var(--panel);border-right:1px solid var(--line);overflow:auto;max-height:calc(100vh - 64px)}
+.panel{border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:11px;background:#0b2031}.panel h2{font-size:13px;margin:0 0 10px;color:#bfe8fb;letter-spacing:.3px}
+label{display:block;font-size:12px;color:var(--muted);margin:8px 0 4px}input,select,textarea{width:100%;background:#071a29;color:var(--text);border:1px solid #31566e;border-radius:7px;padding:9px;font:inherit;min-width:0}
+input[type=file]{font-size:11px;padding:7px}input[type=checkbox]{width:auto}button{border:1px solid #32617c;background:#12364d;color:#e8f3fb;border-radius:7px;padding:9px 11px;font:inherit;cursor:pointer;min-height:38px}
+button.primary{background:#087ca4;border-color:#0891b2;color:white;font-weight:700}button:hover{filter:brightness(1.12)}button:disabled{opacity:.5;cursor:not-allowed}
+.row{display:flex;gap:7px}.row>*{flex:1;min-width:0}.hint{font-size:11px;color:#90aabd;line-height:1.5;margin-top:6px}
+.tabs{display:flex;gap:6px;margin-bottom:10px}.tabs button{flex:1;font-size:12px;padding:7px}.tabs button.active{background:#075985;border-color:#38bdf8}
+main{min-width:0;display:flex;flex-direction:column}.toolbar{padding:9px 12px;background:#0a2030;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.toolbar button{font-size:12px;padding:7px 10px;min-height:32px}.toolbar .active{background:#075985;border-color:#38bdf8}
+.mapwrap{height:min(68vh,720px);min-height:420px;position:relative;background:#061522}#map,#cesiumMap{position:absolute;inset:0}#cesiumMap{display:none}.mapnote{position:absolute;z-index:500;left:12px;bottom:12px;background:#061a29e8;border:1px solid #31566e;border-radius:8px;padding:8px 10px;font-size:11px;max-width:300px}
+.legend{display:flex;gap:12px;flex-wrap:wrap}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px}
+.below{padding:12px;display:grid;grid-template-columns:1.2fr 1fr;gap:12px}.card{border:1px solid var(--line);border-radius:10px;background:#0b2031;padding:12px;min-width:0}.card h2{font-size:13px;margin:0 0 10px;color:#bfe8fb}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px}.kpi{background:#102c40;border:1px solid #254b64;border-radius:8px;padding:9px}.kpi small{display:block;color:var(--muted);font-size:10px}.kpi strong{font-size:20px}
+table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;border-bottom:1px solid #25465b;text-align:left;vertical-align:top}th{color:#9fc4d9;font-weight:600}
+.badge{padding:3px 6px;border-radius:5px;font-size:10px;font-weight:700;white-space:nowrap}.b-red{background:#5b1e2b;color:#ff9aaa}.b-orange{background:#5a3517;color:#ffc58c}.b-yellow{background:#514313;color:#ffe68a}.b-green{background:#123f36;color:#9af0cf}.b-blue{background:#123b55;color:#a8e4ff}
+#feedStatus{font-size:11px;color:var(--muted);line-height:1.6}.route-list{max-height:190px;overflow:auto}.route-list table{font-size:11px}
+.notice{border-left:3px solid #f59e0b;padding:8px 10px;background:#302714;color:#fce7b2;font-size:11px;border-radius:4px;margin-top:8px}
+.leaflet-popup-content-wrapper,.leaflet-popup-tip{background:#0b2639;color:#e8f3fb}.leaflet-popup-content{font-size:12px}
+@media(max-width:900px){.layout{grid-template-columns:1fr}aside{max-height:none;border-right:0;border-bottom:1px solid var(--line)}.mapwrap{height:55vh;min-height:380px}.below{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<header>
+ <div class="brand"><div class="mark">GT</div><div><h1>GLOBAL TURBULENCE MONITORING SYSTEM</h1><small>항공사 운항안전 · 기상 위험 모니터링</small></div></div>
+ <div class="top-actions"><span class="pill">GTMS v1.0 · PROTOTYPE</span><span class="status" id="clock">UTC --:--</span><button id="refreshBtn" class="primary">기상정보 새로고침</button></div>
+</header>
+<div class="layout">
+<aside>
+ <section class="panel">
+  <h2>FLIGHT / ROUTE INPUT</h2>
+  <label>항공편 번호</label><input id="flightNo" value="TW123" placeholder="예: TW123">
+  <div class="row"><div><label>출발지 ICAO</label><input id="origin" value="RKSI" maxlength="4"></div><div><label>도착지 ICAO</label><input id="destination" value="KLAX" maxlength="4"></div></div>
+  <div class="row"><div><label>순항고도 (ft MSL)</label><input id="flightLevel" type="number" value="35000" step="1000"></div><div><label>예정 출발 (UTC)</label><input id="departTime" type="datetime-local"></div></div>
+  <label>항적 입력 방법</label>
+  <div class="tabs"><button class="active" data-tab="manual">직접 입력</button><button data-tab="kml">KML</button><button data-tab="excel">Excel / CSV</button></div>
+  <div id="manualPane">
+   <label>경로 좌표 (위도,경도 / 한 줄에 한 지점)</label>
+   <textarea id="coords" rows="5" placeholder="37.4602,126.4407&#10;40.0,150.0&#10;35.0,180.0&#10;33.9416,-118.4085">37.4602,126.4407
+40.0,150.0
+42.0,175.0
+40.0,-165.0
+36.0,-145.0
+33.9416,-118.4085</textarea>
+   <div class="hint">기본 예시는 설명용 경로입니다. 실제 운항 항적이나 OFP 좌표로 교체하세요.</div>
+  </div>
+  <div id="kmlPane" hidden><label>KML 항적 파일</label><input id="kmlFile" type="file" accept=".kml,.xml"><div class="hint">시간 정보가 있는 Point 항적을 우선 읽습니다. altitudeMode=absolute 고도는 MSL 값으로 보존합니다.</div></div>
+  <div id="excelPane" hidden><label>Excel / CSV 파일</label><input id="excelFile" type="file" accept=".xlsx,.xls,.csv"><div class="hint">첫 번째 시트에서 latitude/longitude 또는 lat/lon 열을 읽습니다. 선택 항목: flight, altitude_ft, time.</div></div>
+  <div class="row" style="margin-top:10px"><button id="plotRoute" class="primary">항로 표시 및 분석</button><button id="clearRoute">초기화</button></div>
+ </section>
+ <section class="panel">
+  <h2>WEATHER LAYERS</h2>
+  <label><input type="checkbox" id="showSigmet" checked> SIGMET 영역</label>
+  <label><input type="checkbox" id="showPirep" checked> PIREP / AIREP 보고</label>
+  <label><input type="checkbox" id="showRisk" checked> 항로 위험도 구간</label>
+  <label><input type="checkbox" id="showRoute" checked> 비행 항적</label>
+  <div class="hint">SIGMET은 전 세계 항공기상 특보, PIREP은 주로 미국·북대서양 중심으로 수집됩니다.</div>
+ </section>
+ <section class="panel">
+  <h2>ALTITUDE FILTER</h2>
+  <label>분석 고도</label><select id="altitude"><option value="20000">FL200</option><option value="25000">FL250</option><option value="30000">FL300</option><option value="35000" selected>FL350</option><option value="39000">FL390</option><option value="41000">FL410</option></select>
+  <label>예측 범위</label><select id="horizon"><option value="6">6시간</option><option value="12">12시간</option><option value="24">24시간</option><option value="48" selected>48시간</option></select>
+  <div class="hint">고도별 바람 자료 기반의 초기 스크리닝입니다. 정식 난기류 예보나 운항승인 자료가 아닙니다.</div>
+ </section>
+ <section class="panel">
+  <h2>DATA SOURCES / STATUS</h2><div id="feedStatus">서버 연결 확인 중…</div>
+  <div class="hint">NOAA Aviation Weather · Open-Meteo / ECMWF 모델 · OpenStreetMap</div>
+ </section>
+</aside>
+<main>
+ <div class="toolbar">
+  <button id="map2d" class="active">2D WORLD MAP</button><button id="map3d">3D GLOBE</button>
+  <span class="pill">UTC 기준</span><span class="pill" id="lastUpdate">마지막 갱신: -</span>
+  <div class="legend" style="margin-left:auto;font-size:11px;color:#b7cddd">
+   <span><i class="dot" style="background:#36d399"></i>낮음</span><span><i class="dot" style="background:#facc15"></i>주의</span><span><i class="dot" style="background:#fb923c"></i>높음</span><span><i class="dot" style="background:#ff5263"></i>매우 높음</span>
+  </div>
+ </div>
+ <div class="mapwrap"><div id="map"></div><div id="cesiumMap"></div><div class="mapnote">지도상의 난기류 색상은 기상자료 기반 선별지표이며, 실제 난기류 강도 관측값과 구분해야 합니다.</div></div>
+ <div class="below">
+  <section class="card">
+   <h2>ROUTE TURBULENCE ASSESSMENT</h2>
+   <div class="kpis">
+    <div class="kpi"><small>항로 구간</small><strong id="kpiSegments">0</strong></div>
+    <div class="kpi"><small>최고 위험등급</small><strong id="kpiRisk">-</strong></div>
+    <div class="kpi"><small>PIREP 보고</small><strong id="kpiPirep">0</strong></div>
+    <div class="kpi"><small>SIGMET</small><strong id="kpiSigmet">0</strong></div>
+   </div>
+   <div class="route-list"><table><thead><tr><th>구간</th><th>위치</th><th>고도</th><th>위험지표</th><th>근거</th></tr></thead><tbody id="routeRows"><tr><td colspan="5">항로를 입력하고 분석을 실행하세요.</td></tr></tbody></table></div>
+  </section>
+  <section class="card">
+   <h2>LIVE AVIATION WEATHER FEEDS</h2>
+   <div id="feedTable">기상정보를 불러오는 중…</div>
+   <div class="notice">운항 안전상 주의: 본 시스템은 초기 프로토타입입니다. 예측지표·공개 관측정보는 참고용이며, 회사 승인 기상정보, 공식 SIGMET/VAAC/SWA, 운항통제 절차 및 조종사 판단을 대체하지 않습니다.</div>
+  </section>
+ </div>
+</main>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+let map, routeLayer, sigmetLayer, pirepLayer, cesiumViewer, currentRoute=[], sigmets=[], pireps=[], routeAssessments=[];
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function utcClock(){ $('clock').textContent='UTC '+new Date().toISOString().slice(11,16); }
+setInterval(utcClock,1000);utcClock();
+map=L.map('map',{worldCopyJump:true}).setView([25,145],3);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'&copy; OpenStreetMap'}).addTo(map);
+routeLayer=L.layerGroup().addTo(map);sigmetLayer=L.layerGroup().addTo(map);pirepLayer=L.layerGroup().addTo(map);
+function setFeed(msg){$('feedStatus').innerHTML=msg}
+async function getJSON(url){const r=await fetch(url);if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}
+function riskColor(level){return level>=4?'#ff5263':level===3?'#fb923c':level===2?'#facc15':'#36d399'}
+function riskLabel(level){return ['낮음','주의','높음','매우 높음','매우 높음'][Math.max(0,Math.min(4,level))]}
+function drawRoute(){
+ routeLayer.clearLayers();if(currentRoute.length<2)return;
+ const ll=currentRoute.map(p=>[p.lat,p.lon]);
+ L.polyline(ll,{color:'#d7e8f5',weight:3,opacity:.85,dashArray:'7 6'}).addTo(routeLayer);
+ currentRoute.forEach((p,i)=>L.circleMarker([p.lat,p.lon],{radius:i===0||i===currentRoute.length-1?6:3,color:'#38bdf8',fillColor:'#087ca4',fillOpacity:1,weight:1}).bindPopup(`<b>${i===0?'DEP':i===currentRoute.length-1?'DEST':'WP '+i}</b><br>${p.lat.toFixed(4)}, ${p.lon.toFixed(4)}<br>고도: ${p.alt_ft??$('flightLevel').value} ft MSL`).addTo(routeLayer));
+ map.fitBounds(ll,{padding:[35,35]});
+}
+function parseCoords(){return $('coords').value.split(/\n|;/).map(s=>s.trim()).filter(Boolean).map(s=>{const a=s.split(/[,\s]+/).map(Number);if(a.length<2||!Number.isFinite(a[0])||!Number.isFinite(a[1])||Math.abs(a[0])>90||Math.abs(a[1])>180)throw Error('좌표 형식 오류: '+s);return {lat:a[0],lon:a[1],alt_ft:Number($('flightLevel').value)||35000}})}
+function parseKML(text){
+ const doc=new DOMParser().parseFromString(text,'text/xml');if(doc.querySelector('parsererror'))throw Error('KML XML을 읽을 수 없습니다.');
+ let pts=[...doc.getElementsByTagName('Placemark')].flatMap(pm=>{
+  const ts=[...pm.getElementsByTagName('gx:Track')];let out=[];
+  ts.forEach(t=>{const whens=[...t.getElementsByTagName('when')].map(x=>x.textContent);const coords=[...t.getElementsByTagName('gx:coord')].map(x=>x.textContent.trim().split(/\s+/).map(Number));coords.forEach((c,i)=>{if(c.length>=2)out.push({lon:c[0],lat:c[1],alt_m:c[2]||0,time:whens[i]||null})})});
+  if(out.length)return out;
+  const line=pm.getElementsByTagName('LineString')[0];if(line){const c=line.getElementsByTagName('coordinates')[0]?.textContent||'';return c.trim().split(/\s+/).map(v=>{const a=v.split(',').map(Number);return {lon:a[0],lat:a[1],alt_m:a[2]||0}})}
+  const point=pm.getElementsByTagName('Point')[0];if(point){const c=point.getElementsByTagName('coordinates')[0]?.textContent||'';const a=c.trim().split(',').map(Number);if(a.length>=2)return [{lon:a[0],lat:a[1],alt_m:a[2]||0}]}
+  return out;
+ });
+ if(!pts.length)throw Error('KML에서 경로 좌표를 찾지 못했습니다.');
+ return pts.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon)).map(p=>({...p,alt_ft:p.alt_m?Math.round(p.alt_m*3.28084):Number($('flightLevel').value)||35000}));
+}
+async function loadExcel(file){
+ const buf=await file.arrayBuffer(), wb=XLSX.read(buf,{type:'array'}), rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:null});
+ if(!rows.length)throw Error('엑셀에 데이터가 없습니다.');
+ const norm=s=>String(s||'').toLowerCase().replace(/[^a-z0-9가-힣]/g,'');
+ const keys=Object.keys(rows[0]);const find=names=>keys.find(k=>names.includes(norm(k)));
+ const latK=find(['lat','latitude','위도']),lonK=find(['lon','lng','longitude','경도']);
+ if(!latK||!lonK)throw Error('위도(latitude/lat)와 경도(longitude/lon) 열이 필요합니다.');
+ return rows.map(r=>({lat:Number(r[latK]),lon:Number(r[lonK]),alt_ft:Number(r[find(['altitudeft','altft','고도'])]||$('flightLevel').value)})).filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
+}
+document.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-tab]').forEach(x=>x.classList.toggle('active',x===b));['manual','kml','excel'].forEach(k=>$(k+'Pane').hidden=k!==b.dataset.tab)}));
+$('plotRoute').onclick=async()=>{
+ try{
+  const tab=document.querySelector('[data-tab].active').dataset.tab;
+  if(tab==='manual')currentRoute=parseCoords();
+  if(tab==='kml'){const f=$('kmlFile').files[0];if(!f)throw Error('KML 파일을 선택하세요.');currentRoute=parseKML(await f.text())}
+  if(tab==='excel'){const f=$('excelFile').files[0];if(!f)throw Error('Excel/CSV 파일을 선택하세요.');currentRoute=await loadExcel(f)}
+  if(currentRoute.length<2)throw Error('항로 좌표가 2개 이상 필요합니다.');
+  $('flightNo').value=$('flightNo').value.trim().toUpperCase()||'UNASSIGNED';
+  drawRoute();await assessRoute();
+ }catch(e){alert(e.message)}
+};
+$('clearRoute').onclick=()=>{currentRoute=[];routeLayer.clearLayers();$('routeRows').innerHTML='<tr><td colspan="5">항로를 입력하고 분석을 실행하세요.</td></tr>';['kpiSegments','kpiPirep','kpiSigmet'].forEach(k=>$(k).textContent='0');$('kpiRisk').textContent='-'};
+$('showRoute').onchange=e=>e.target.checked?routeLayer.addTo(map):map.removeLayer(routeLayer);
+$('showSigmet').onchange=e=>e.target.checked?sigmetLayer.addTo(map):map.removeLayer(sigmetLayer);
+$('showPirep').onchange=e=>e.target.checked?pirepLayer.addTo(map):map.removeLayer(pirepLayer);
+$('showRisk').onchange=()=>renderAssessment();
+function geomToLayers(feature,style){
+ const g=feature.geometry;if(!g)return;
+ if(g.type==='Polygon')L.polygon(g.coordinates[0].map(c=>[c[1],c[0]]),style).addTo(sigmetLayer);
+ if(g.type==='MultiPolygon')g.coordinates.forEach(poly=>L.polygon(poly[0].map(c=>[c[1],c[0]]),style).addTo(sigmetLayer));
+ if(g.type==='LineString')L.polyline(g.coordinates.map(c=>[c[1],c[0]]),style).addTo(sigmetLayer);
+}
+function extractFeatures(data){if(Array.isArray(data))return data.map(x=>x.type==='Feature'?x:{type:'Feature',geometry:x.geometry||null,properties:x});return data?.features||[]}
+async function refreshFeeds(){
+ $('refreshBtn').disabled=true;setFeed('기상정보 요청 중…');
+ const statuses=[];
+ try{
+  const d=await getJSON('/api/noaa/sigmets');sigmets=extractFeatures(d);sigmetLayer.clearLayers();
+  sigmets.forEach(f=>geomToLayers(f,{color:'#ff9d43',weight:2,fillColor:'#ff6633',fillOpacity:.16}));
+  $('kpiSigmet').textContent=sigmets.length;statuses.push(`<span style="color:#86efac">● SIGMET ${sigmets.length}건</span>`);
+ }catch(e){statuses.push(`<span style="color:#fca5a5">● SIGMET 조회 실패 (${esc(e.message)})</span>`)}
+ try{
+  const d=await getJSON('/api/noaa/pireps');pireps=extractFeatures(d);pirepLayer.clearLayers();
+  pireps.forEach(f=>{const p=f.properties||{},g=f.geometry;let lat,lon;if(g?.type==='Point'){lon=g.coordinates[0];lat=g.coordinates[1]}else{lat=Number(p.lat||p.latitude);lon=Number(p.lon||p.longitude)}if(!Number.isFinite(lat)||!Number.isFinite(lon))return;
+   const raw=JSON.stringify(p).toUpperCase(),level=/SEV|EXTREME/.test(raw)?4:/MOD/.test(raw)?2:/LGT|LIGHT/.test(raw)?1:0;
+   L.circleMarker([lat,lon],{radius:level>=3?7:5,color:riskColor(level),fillColor:riskColor(level),fillOpacity:.9}).bindPopup(`<b>PIREP / AIREP</b><br>${esc(p.rawOb||p.raw||p.report||p.turbulence||'조종사 보고')}<br>${esc(p.obsTime||p.time||'시간정보 미상')}`).addTo(pirepLayer);
+  });
+  $('kpiPirep').textContent=pireps.length;statuses.push(`<span style="color:#86efac">● PIREP ${pireps.length}건</span>`);
+ }catch(e){statuses.push(`<span style="color:#fca5a5">● PIREP 조회 실패 (${esc(e.message)})</span>`)}
+ $('lastUpdate').textContent='마지막 갱신: '+new Date().toISOString().slice(11,19)+' UTC';
+ $('feedTable').innerHTML=`<table><tr><th>자료</th><th>수신</th><th>범위/비고</th></tr><tr><td>NOAA SIGMET</td><td>${sigmets.length} features</td><td>전 세계 항공기상 특보</td></tr><tr><td>NOAA PIREP</td><td>${pireps.length} reports</td><td>주로 미국·북대서양</td></tr><tr><td>ECMWF via Open-Meteo</td><td>항로 분석 시 호출</td><td>최대 48시간 예측</td></tr></table>`;
+ setFeed(statuses.join('<br>')+'<br>갱신 시각 '+new Date().toISOString().slice(11,19)+' UTC');
+ $('refreshBtn').disabled=false;
+}
+function interpolate(a,b,t){return {lat:a.lat+(b.lat-a.lat)*t,lon:a.lon+(b.lon-a.lon)*t}}
+async function assessRoute(){
+ if(currentRoute.length<2)return;
+ const samples=[];for(let i=0;i<currentRoute.length-1;i++){for(let j=0;j<2;j++)samples.push(interpolate(currentRoute[i],currentRoute[i+1],j/2))}samples.push(currentRoute[currentRoute.length-1]);
+ const unique=samples.filter((p,i)=>i%Math.max(1,Math.ceil(samples.length/10))===0);if(unique[unique.length-1]!==samples[samples.length-1])unique.push(samples[samples.length-1]);
+ const rows=[];for(let i=0;i<unique.length;i++){try{const p=unique[i],alt=Number($('altitude').value)||35000;const d=await getJSON(`/api/forecast?lat=${p.lat}&lon=${p.lon}&alt_ft=${alt}&hours=${$('horizon').value}`);rows.push({p,wind:d.wind_speed,dir:d.wind_direction,shear:d.shear,score:d.score,category:d.category,time:d.time,source:d.source})}catch(e){rows.push({p:unique[i],score:null,category:'자료없음',error:e.message})}}
+ routeAssessments=rows;renderAssessment();
+}
+function renderAssessment(){
+ const rows=routeAssessments;$('kpiSegments').textContent=Math.max(0,rows.length-1);
+ const max=rows.reduce((m,r)=>Math.max(m,r.score??0),0);$('kpiRisk').textContent=rows.length?riskLabel(max):'-';
+ if(!$('showRisk').checked){$('routeRows').innerHTML='<tr><td colspan="5">위험도 레이어가 꺼져 있습니다.</td></tr>';return}
+ routeLayer.clearLayers();drawRoute();
+ let html='';
+ rows.forEach((r,i)=>{if(i>0&&r.score!=null){const prev=rows[i-1];const c=riskColor(r.score);L.polyline([[prev.p.lat,prev.p.lon],[r.p.lat,r.p.lon]],{color:c,weight:7,opacity:.9}).bindPopup(`<b>${riskLabel(r.score)}</b><br>풍속 ${r.wind??'-'} m/s<br>수직층 풍속차 기반 선별지표`).addTo(routeLayer)}
+ html+=`<tr><td>${i+1}</td><td>${r.p.lat.toFixed(2)}, ${r.p.lon.toFixed(2)}</td><td>FL${Math.round(Number($('altitude').value)/100)}</td><td><span class="badge ${r.score>=4?'b-red':r.score===3?'b-orange':r.score===2?'b-yellow':r.score===1?'b-green':'b-blue'}">${r.category||'자료없음'}</span></td><td>${r.shear!=null?'풍속차 '+r.shear+' m/s':esc(r.error||'자료 없음')}</td></tr>`});
+ $('routeRows').innerHTML=html||'<tr><td colspan="5">분석 결과가 없습니다.</td></tr>';
+}
+$('refreshBtn').onclick=refreshFeeds;
+$('map2d').onclick=()=>{ $('map').style.display='block';$('cesiumMap').style.display='none';$('map2d').classList.add('active');$('map3d').classList.remove('active');setTimeout(()=>map.invalidateSize(),100)};
+$('map3d').onclick=()=>{
+ $('map').style.display='none';$('cesiumMap').style.display='block';$('map3d').classList.add('active');$('map2d').classList.remove('active');
+ if(!cesiumViewer){try{cesiumViewer=new Cesium.Viewer('cesiumMap',{animation:false,timeline:false,baseLayerPicker:true,geocoder:false,homeButton:true,sceneModePicker:true,navigationHelpButton:false,infoBox:false,selectionIndicator:false});cesiumViewer.camera.flyHome(0); }catch(e){alert('3D 지도를 초기화하지 못했습니다: '+e.message)}}
+ if(cesiumViewer&&currentRoute.length>1){const pts=currentRoute.map(p=>Cesium.Cartesian3.fromDegrees(p.lon,p.lat,(p.alt_ft||35000)*0.3048));cesiumViewer.entities.removeAll();cesiumViewer.entities.add({polyline:{positions:pts,width:4,material:Cesium.Color.CYAN}});pts.forEach((pt,i)=>cesiumViewer.entities.add({position:pt,point:{pixelSize:i===0||i===pts.length-1?9:5,color:Cesium.Color.CYAN}}));cesiumViewer.zoomTo(cesiumViewer.entities)}
+};
+refreshFeeds();
+setInterval(refreshFeeds,5*60*1000);
+</script>
+</body></html>
