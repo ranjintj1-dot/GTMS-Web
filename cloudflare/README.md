@@ -19,11 +19,11 @@ The Worker accepts browser requests only from:
 1. Open Cloudflare Dashboard → **Workers & Pages** → **Create application**.
 2. Choose **Workers** / **Connect to Git** (GitHub).
 3. Authorize the Cloudflare GitHub application and select `ranjintj1-dot/GTMS-Web`.
-4. Set the Worker name to **gtms-noaa-proxy**.
+4. Set the Worker name to **rapid-snow-b36a** (must match `cloudflare/wrangler.jsonc`).
 5. Set the root directory to **cloudflare**.
 6. Leave the build command empty. Use the default deploy command `npx wrangler deploy`.
 7. Save and deploy. Cloudflare provides a URL similar to:
-   `https://gtms-noaa-proxy.<your-account-subdomain>.workers.dev`
+   `https://rapid-snow-b36a.<your-account-subdomain>.workers.dev`
 8. Test these URLs:
    - `https://<worker-url>/api/health`
    - `https://<worker-url>/api/sigmets`

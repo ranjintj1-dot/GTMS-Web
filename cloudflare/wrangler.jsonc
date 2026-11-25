@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "gtms-noaa-proxy",
+  "name": "rapid-snow-b36a",
   "main": "worker.js",
   "compatibility_date": "2026-11-25",
   "workers_dev": true,
