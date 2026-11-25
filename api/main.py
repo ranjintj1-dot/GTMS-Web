@@ -399,6 +399,36 @@ def _get_gfs_bundle(points: list[Point], hours: int) -> tuple[datetime, Path]:
     raise RuntimeError("NOAA GFS 공개 자료를 가져오지 못했습니다. " + " | ".join(errors[-3:]))
 
 
+@app.get("/api/noaa-smoke")
+def noaa_smoke(lat: float = 37.5, lon: float = 127.0):
+    point = Point(lat=lat, lon=lon)
+    try:
+        with LOCK:
+            cycle, path = _get_gfs_bundle([point], 12)
+            fields = _read_fields(path, [point])
+            rows = _build_rows("gfs", cycle, [point], fields, fields, 12)
+        hourly = rows[0]["hourly"]
+        required = [
+            "wind_speed_300hPa", "wind_speed_250hPa", "wind_speed_200hPa",
+            "temperature_250hPa", "geopotential_height_250hPa",
+        ]
+        counts = {
+            key: sum(value is not None for value in hourly.get(key, []))
+            for key in required
+        }
+        return {
+            "status": "ok" if any(counts.values()) else "no_data",
+            "source": "NOAA NOMADS GFS 0.25 degree",
+            "cycle_utc": cycle.strftime("%Y-%m-%dT%H:%MZ"),
+            "cache_file_bytes": path.stat().st_size,
+            "forecast_times_utc": hourly["time"],
+            "valid_values_by_field": counts,
+            "sample_wind_speed_250hPa_ms": hourly["wind_speed_250hPa"],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"NOAA GFS self-test failed: {type(exc).__name__}: {exc}") from exc
+
+
 @app.get("/")
 def root():
     return health()
