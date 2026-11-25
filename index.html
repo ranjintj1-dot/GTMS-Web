@@ -163,6 +163,7 @@ const $=id=>document.getElementById(id);
 let map, routeLayer, riskLayer, sigmetLayer, pirepLayer, aiCatLayer, aiConvectiveLayer, aiCompositeCanvasLayer, aiCatCanvasLayer, aiConvectiveCanvasLayer, aiWindCanvasLayer, cesiumViewer, currentRoute=[], sigmets=[], pireps=[], routeAssessments=[];
 let aiGridResults=[], aiGridMeta=null, aiRefreshTimer=null, aiLastRefreshAt=0, aiBusy=false, aiCesiumEntities=[];
 let aiModelPointCache=new Map(), aiModelQuotaBlocked=new Set();
+let aiDataSources=new Set();
 let aiCacheStats={requests:0,fetchedPoints:0,reusedPoints:0};
 const AI_MODEL_CACHE_TTL=3*60*60*1000;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -202,6 +203,7 @@ function modelHourly(modelRow){
 function modelPointRows(payload,expected){
  const rows=Array.isArray(payload)?payload:[payload];
  if(rows.length!==expected)throw new Error('모델 응답 지점 수 불일치: '+rows.length+'/'+expected);
+ rows.forEach(row=>{if(row?.source)aiDataSources.add(String(row.source))});
  return rows;
 }
 function windUV(speed,direction){
@@ -567,6 +569,7 @@ async function refreshAiGrid(force=false){
   const targetLead=Math.min(Number($('aiForecastHour').value)||0,horizon);
   const pressure=Number($('windPressure').value)||250;
   aiCacheStats={requests:0,fetchedPoints:0,reusedPoints:0};
+  aiDataSources=new Set();
   let aifsRows=null,ifsRows=null,aifsError=null,ifsError=null;
   if(chosen==='aifs'||chosen==='hybrid'){
    try{aifsRows=await fetchEcmwfGridCached('ecmwf_aifs025_single',points,horizon)}catch(e){aifsError=e}
@@ -621,12 +624,13 @@ async function refreshAiGrid(force=false){
    '최고 CAT 지수: <b>'+maxCat+'/100 ('+aiRiskLabel(maxCat)+')</b><br>'+
    '최고 대류성 지수: <b>'+maxConv+'/100 ('+aiRiskLabel(maxConv)+')</b><br>'+
    '예보 유효시각: '+esc(validTime||'-')+' UTC · 화면 갱신: '+new Date().toISOString().slice(11,19)+' UTC<br>'+
+   '자료원: '+esc(Array.from(aiDataSources).join(' + ')||'GTMS 기상자료 서버')+'<br>'+
    'API 요청 '+aiCacheStats.requests+'회 · 신규 격자 '+aiCacheStats.fetchedPoints+'개 · 캐시 재사용 '+aiCacheStats.reusedPoints+'개'+
    ((aifsError||ifsError)?'<br><span style="color:#fcd34d">일부 모델 조회 실패, 수신 가능한 모델 자료로 대체: '+esc((aifsError||ifsError).message)+'</span>':'');
   $('lastUpdate').textContent='AI 예보 유효: '+(validTime||'--')+' UTC';
  }catch(error){
-  $('aiSummary').innerHTML='<span style="color:#fca5a5">● GTMS 자체 ECMWF 자료 수신 실패: '+esc(error.message)+'</span><br>'+
-   '서버 상태 또는 ECMWF Open Data 자료 배포 여부를 확인하세요.';
+  $('aiSummary').innerHTML='<span style="color:#fca5a5">● GTMS 공개 기상자료 수신 실패: '+esc(error.message)+'</span><br>'+
+   'ECMWF와 NOAA GFS 자료원 모두 응답하지 않았습니다.';
  }finally{
   aiBusy=false;
   if(button)button.disabled=false;
@@ -898,9 +902,10 @@ async function refreshFeeds(){
   statuses.push('<span style="color:#fcd34d">● Cloudflare Worker 주소 설정 대기</span>');
  }
 
- feedRows.push('<tr><td>ECMWF AIFS / IFS Open Data</td><td>GTMS 자체 서버 · AWS 원자료</td><td><a href="https://www.ecmwf.int/en/forecasts/datasets/open-data" target="_blank" rel="noopener">공식 자료</a></td></tr>');
+ feedRows.push('<tr><td>ECMWF AIFS / IFS Open Data</td><td>GTMS 자체 서버 · 공개 미러</td><td><a href="https://www.ecmwf.int/en/forecasts/datasets/open-data" target="_blank" rel="noopener">공식 자료</a></td></tr>');
+ feedRows.push('<tr><td>NOAA GFS 0.25°</td><td>ECMWF 응답 실패 시 자동 대체</td><td><a href="https://nomads.ncep.noaa.gov/" target="_blank" rel="noopener">NOMADS</a></td></tr>');
  $('feedTable').innerHTML='<table><tr><th>자료</th><th>상태</th><th>조회</th></tr>'+feedRows.join('')+'</table>';
- statuses.push('<span style="color:#86efac">● ECMWF AIFS / IFS: GTMS 자체 서버에서 원자료 수신</span>');
+ statuses.push('<span style="color:#86efac">● ECMWF AIFS / IFS → NOAA GFS: GTMS 자체 서버 자동 전환</span>');
  statuses.push('<span style="color:#9bb5c7">PIREP/AIREP 자료 범위는 주로 미국·북대서양이며 전 세계를 완전히 포괄하지 않습니다.</span>');
  setFeed(statuses.join('<br>'));
  $('lastUpdate').textContent='마지막 갱신: '+new Date().toISOString().slice(11,19)+' UTC';
@@ -923,6 +928,7 @@ async function assessRoute(){
  let rows=[];
  try{
   aiCacheStats={requests:0,fetchedPoints:0,reusedPoints:0};
+  aiDataSources=new Set();
   const modelRows=await fetchEcmwfGridCached('ecmwf_ifs025',unique,hours);
   rows=unique.map((point,index)=>{
    const result=evaluateModelPoint(modelRows[index],hours,Number($('aiForecastHour').value)||0,Number($('windPressure').value)||250);
@@ -947,7 +953,7 @@ async function assessRoute(){
  const failures=rows.filter(r=>r.score===null).length;
  const valid=rows.length-failures;
  setFeed(
-  '<span style="color:'+(failures?'#fcd34d':'#86efac')+'">● ECMWF Open Data AWS: 항로 분석 '+(failures?'부분':'')+'완료</span><br>'+
+  '<span style="color:'+(failures?'#fcd34d':'#86efac')+'">● '+esc(Array.from(aiDataSources).join(' + ')||'GTMS 공개 기상자료')+': 항로 분석 '+(failures?'부분':'')+'완료</span><br>'+
   '조회 지점 '+rows.length+'개 · 유효 '+valid+'개 · 자료 누락 '+failures+'개 · '+hours+'시간 범위'+
   '<br><span style="color:#9bb5c7">AIFS / IFS 원자료 · GTMS 자체 서버 처리</span>'
  );
