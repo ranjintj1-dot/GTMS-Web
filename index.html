@@ -54,7 +54,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
   <div class="row"><div><label>출발지 ICAO</label><input id="origin" value="RKSI" maxlength="4"></div><div><label>도착지 ICAO</label><input id="destination" value="KLAX" maxlength="4"></div></div>
   <div class="row"><div><label>순항고도 (ft MSL)</label><input id="flightLevel" type="number" value="35000" step="1000"></div><div><label>예정 출발 (UTC)</label><input id="departTime" type="datetime-local"></div></div>
   <label>항적 입력 방법</label>
-  <div class="tabs"><button class="active" data-tab="manual">직접 입력</button><button data-tab="kml">KML</button><button data-tab="excel">Excel / CSV</button></div>
+  <div class="tabs"><button class="active" data-tab="manual">직접 입력</button><button data-tab="kml">KML</button><button data-tab="gpx">GPX</button><button data-tab="excel">Excel / CSV</button></div>
   <div id="manualPane">
    <label>경로 좌표 (위도,경도 / 한 줄에 한 지점)</label>
    <textarea id="coords" rows="5" placeholder="37.4602,126.4407&#10;40.0,150.0&#10;35.0,180.0&#10;33.9416,-118.4085">37.4602,126.4407
@@ -66,6 +66,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
    <div class="hint">기본 예시는 설명용 경로입니다. 실제 운항 항적이나 OFP 좌표로 교체하세요.</div>
   </div>
   <div id="kmlPane" hidden><label>KML 항적 파일</label><input id="kmlFile" type="file" accept=".kml,.xml"><div class="hint">시간 정보가 있는 Point 항적을 우선 읽습니다. altitudeMode=absolute 고도는 MSL 값으로 보존합니다.</div></div>
+  <div id="gpxPane" hidden><label>GPX 항적 파일</label><input id="gpxFile" type="file" accept=".gpx,application/gpx+xml,application/xml"><div class="hint">GPX Track(trkpt)을 우선 읽고, Track이 없으면 Route(rtept)를 읽습니다. 고도(ele)는 미터에서 ft로 변환하며, time 값은 항적 시각으로 보존합니다.</div></div>
   <div id="excelPane" hidden><label>Excel / CSV 파일</label><input id="excelFile" type="file" accept=".xlsx,.xls,.csv"><div class="hint">첫 번째 시트에서 latitude/longitude 또는 lat/lon 열을 읽습니다. 선택 항목: flight, altitude_ft, time.</div></div>
   <div class="row" style="margin-top:10px"><button id="plotRoute" class="primary">항로 표시 및 분석</button><button id="clearRoute">초기화</button></div>
  </section>
@@ -699,6 +700,46 @@ function parseKML(text){
  if(!pts.length)throw Error('KML에서 경로 좌표를 찾지 못했습니다.');
  return pts.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon)).map(p=>({...p,alt_ft:p.alt_m?Math.round(p.alt_m*3.28084):Number($('flightLevel').value)||35000}));
 }
+function parseGPX(text){
+ const doc=new DOMParser().parseFromString(text,'application/xml');
+ if(doc.querySelector('parsererror'))throw Error('GPX XML을 읽을 수 없습니다. 파일 형식을 확인하세요.');
+ const root=doc.documentElement;
+ if(!root||String(root.localName||root.nodeName).toLowerCase()!=='gpx'){
+  throw Error('선택한 파일은 GPX 형식이 아닙니다.');
+ }
+ const all=[...doc.getElementsByTagName('*')];
+ const byName=name=>all.filter(el=>String(el.localName||el.nodeName).toLowerCase()===name);
+ const childText=(el,name)=>{
+  const child=[...el.children].find(x=>String(x.localName||x.nodeName).toLowerCase()===name);
+  return child?.textContent?.trim()||'';
+ };
+ const makePoint=el=>{
+  const lat=Number(el.getAttribute('lat'));
+  const lon=Number(el.getAttribute('lon'));
+  if(!Number.isFinite(lat)||!Number.isFinite(lon)||Math.abs(lat)>90||Math.abs(lon)>180)return null;
+  const eleText=childText(el,'ele');
+  const ele=eleText===''?null:Number(eleText);
+  const time=childText(el,'time')||null;
+  return {
+   lat,lon,
+   alt_ft:ele!==null&&Number.isFinite(ele)?Math.round(ele*3.28084):(Number($('flightLevel').value)||35000),
+   time
+  };
+ };
+
+ // A GPX track is the preferred source because it represents the recorded flight path.
+ let trackPoints=byName('trkpt').map(makePoint).filter(Boolean);
+ let source='Track';
+ if(trackPoints.length<2){
+  // If no usable track is present, use the planned route points instead.
+  trackPoints=byName('rtept').map(makePoint).filter(Boolean);
+  source='Route';
+ }
+ if(trackPoints.length<2){
+  throw Error('GPX에서 유효한 항로 지점을 2개 이상 찾지 못했습니다. Track(trkpt) 또는 Route(rtept)가 필요합니다.');
+ }
+ return trackPoints;
+}
 async function loadExcel(file){
  const buf=await file.arrayBuffer(), wb=XLSX.read(buf,{type:'array'}), rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:null});
  if(!rows.length)throw Error('엑셀에 데이터가 없습니다.');
@@ -708,12 +749,13 @@ async function loadExcel(file){
  if(!latK||!lonK)throw Error('위도(latitude/lat)와 경도(longitude/lon) 열이 필요합니다.');
  return rows.map(r=>({lat:Number(r[latK]),lon:Number(r[lonK]),alt_ft:Number(r[find(['altitudeft','altft','고도'])]||$('flightLevel').value)})).filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
 }
-document.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-tab]').forEach(x=>x.classList.toggle('active',x===b));['manual','kml','excel'].forEach(k=>$(k+'Pane').hidden=k!==b.dataset.tab)}));
+document.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-tab]').forEach(x=>x.classList.toggle('active',x===b));['manual','kml','gpx','excel'].forEach(k=>$(k+'Pane').hidden=k!==b.dataset.tab)}));
 $('plotRoute').onclick=async()=>{
  try{
   const tab=document.querySelector('[data-tab].active').dataset.tab;
   if(tab==='manual')currentRoute=parseCoords();
   if(tab==='kml'){const f=$('kmlFile').files[0];if(!f)throw Error('KML 파일을 선택하세요.');currentRoute=parseKML(await f.text())}
+  if(tab==='gpx'){const f=$('gpxFile').files[0];if(!f)throw Error('GPX 파일을 선택하세요.');currentRoute=parseGPX(await f.text())}
   if(tab==='excel'){const f=$('excelFile').files[0];if(!f)throw Error('Excel/CSV 파일을 선택하세요.');currentRoute=await loadExcel(f)}
   if(currentRoute.length<2)throw Error('항로 좌표가 2개 이상 필요합니다.');
   $('flightNo').value=$('flightNo').value.trim().toUpperCase()||'UNASSIGNED';
