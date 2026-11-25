@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import threading
+import requests
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,7 +25,9 @@ APP_VERSION = "1.0.0"
 CACHE_DIR = Path(os.getenv("GTMS_GRIB_CACHE", "/tmp/gtms-ecmwf"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 FORECAST_STEPS = list(range(0, 49, 6))
+GFS_FORECAST_STEPS = list(range(0, 73, 6))
 PRESSURE_LEVELS = [200, 250, 300, 500]
+NOAA_GFS_FILTER = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
 LOCK = threading.RLock()
 ROW_CACHE: dict[tuple[str, str, str, str, int], tuple[float, dict]] = {}
 ROW_CACHE_TTL = 6 * 3600
@@ -186,9 +189,18 @@ def _read_fields(path: Path, points: list[Point]) -> dict[tuple[str, int, int], 
 
 
 def _field(fields: dict, name: str, level: int, step: int, index: int):
-    values = fields.get((name, level, step))
-    return values[index] if values and index < len(values) else None
-
+    aliases = {
+        "z": ("z", "gh"),
+        "mucape": ("mucape", "cape"),
+        "cape": ("cape", "mucape"),
+        "tp": ("tp", "apcp"),
+        "tcc": ("tcc", "tcdc"),
+    }
+    for candidate in aliases.get(name, (name,)):
+        values = fields.get((candidate, level, step))
+        if values and index < len(values):
+            return values[index]
+    return None
 
 def _build_rows(
     model: str,
@@ -198,7 +210,10 @@ def _build_rows(
     surface_fields: dict,
     hours: int,
 ) -> list[dict]:
-    steps = [step for step in FORECAST_STEPS if step <= hours]
+    available_steps = GFS_FORECAST_STEPS if model == "gfs" else FORECAST_STEPS
+    elapsed_hours = max(0, int((datetime.now(timezone.utc) - cycle).total_seconds() // 3600))
+    last_step = min(max(available_steps), hours + elapsed_hours)
+    steps = [step for step in available_steps if step <= last_step]
     rows: list[dict] = []
     for point_index, _ in enumerate(points):
         hourly: dict[str, list] = {
@@ -239,7 +254,7 @@ def _build_rows(
                     round(t - 273.15, 3) if t is not None else None
                 )
                 hourly[f"geopotential_height_{level}hPa"].append(
-                    round(z / 9.80665, 2) if z is not None else None
+                    round(z if model == "gfs" else z / 9.80665, 2) if z is not None else None
                 )
 
             omega = _field(pressure_fields, "w", 500, step, point_index)
@@ -269,6 +284,121 @@ def _build_rows(
     return rows
 
 
+def _gfs_complete_cycles() -> list[datetime]:
+    now = datetime.now(timezone.utc)
+    current_hour = (now.hour // 6) * 6
+    current = now.replace(hour=current_hour, minute=0, second=0, microsecond=0)
+    # NOMADS output for a newly started cycle may not yet be complete.
+    candidates = [current - timedelta(hours=6 * n) for n in range(0, 5)]
+    return [cycle for cycle in candidates if (now - cycle).total_seconds() >= 4 * 3600] or candidates[1:]
+
+
+def _gfs_cache_file(cycle: datetime) -> Path:
+    return CACHE_DIR / f"noaa_gfs_{cycle:%Y%m%d_%H}_0p25.grib2"
+
+
+def _download_gfs_cycle(cycle: datetime, points: list[Point], hours: int) -> Path:
+    cache_path = _gfs_cache_file(cycle)
+    if cache_path.exists() and cache_path.stat().st_size > 1000:
+        if time.time() - cache_path.stat().st_mtime < 6 * 3600:
+            return cache_path
+        cache_path.unlink(missing_ok=True)
+
+    # NOMADS uses 0..360 degree east longitude for the 0.25-degree global grid.
+    lons = [point.lon % 360.0 for point in points]
+    left = max(0.0, math.floor(min(lons) - 1.0))
+    right = min(359.75, math.ceil(max(lons) + 1.0))
+    bottom = max(-89.75, math.floor(min(p.lat for p in points) - 1.0))
+    top = min(89.75, math.ceil(max(p.lat for p in points) + 1.0))
+    if right - left > 180 or top - bottom > 90:
+        raise RuntimeError(
+            "NOAA GFS 영역이 너무 넓습니다. 지도를 분석 지역으로 확대하거나 항로 분석 구간을 나눠 주세요."
+        )
+
+    # Use 6-hourly forecast slices. Data are cached as one multi-message GRIB2 file.
+    elapsed = max(0, (datetime.now(timezone.utc) - cycle).total_seconds() / 3600.0)
+    first_step = min(72, max(0, int(math.ceil(elapsed / 6.0) * 6)))
+    final_step = min(72, int(math.ceil((elapsed + hours) / 6.0) * 6))
+    steps = [step for step in GFS_FORECAST_STEPS if first_step <= step <= final_step]
+    if not steps:
+        steps = [min(72, first_step)]
+
+    temp_path = cache_path.with_suffix(".part")
+    errors: list[str] = []
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "GTMS-Weather-Gateway/1.0 (NOAA NOMADS public data client)",
+        "Accept": "*/*",
+    })
+    try:
+        with temp_path.open("wb") as output:
+            for step in steps:
+                file_name = f"gfs.t{cycle:%H}z.pgrb2.0p25.f{step:03d}"
+                params = {
+                    "file": file_name,
+                    "dir": f"/gfs.{cycle:%Y%m%d}/{cycle:%H}/atmos",
+                    "subregion": "",
+                    "leftlon": f"{left:.2f}",
+                    "rightlon": f"{right:.2f}",
+                    "toplat": f"{top:.2f}",
+                    "bottomlat": f"{bottom:.2f}",
+                    "var_UGRD": "on",
+                    "var_VGRD": "on",
+                    "var_TMP": "on",
+                    "var_HGT": "on",
+                    "var_VVEL": "on",
+                    "var_CAPE": "on",
+                    "var_APCP": "on",
+                    "var_TCDC": "on",
+                    "lev_200_mb": "on",
+                    "lev_250_mb": "on",
+                    "lev_300_mb": "on",
+                    "lev_500_mb": "on",
+                    "lev_surface": "on",
+                    "lev_entire_atmosphere_single_layer": "on",
+                }
+                try:
+                    response = session.get(
+                        NOAA_GFS_FILTER,
+                        params=params,
+                        timeout=(12, 45),
+                    )
+                    response.raise_for_status()
+                    content = response.content
+                    if len(content) < 1000 or not content.startswith(b"GRIB"):
+                        preview = content[:180].decode("utf-8", "replace")
+                        raise RuntimeError(
+                            f"NOMADS f{step:03d} 응답이 GRIB2가 아닙니다: {preview}"
+                        )
+                    output.write(content)
+                    output.flush()
+                except Exception as exc:
+                    errors.append(f"f{step:03d}: {type(exc).__name__}: {exc}")
+                    raise RuntimeError(
+                        "NOAA NOMADS GFS 자료 다운로드 실패 (" + "; ".join(errors[-3:]) + ")"
+                    ) from exc
+                time.sleep(0.25)
+        if not temp_path.exists() or temp_path.stat().st_size < 1000:
+            raise RuntimeError("NOAA GFS GRIB2 자료가 비어 있습니다.")
+        temp_path.replace(cache_path)
+        return cache_path
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+    finally:
+        session.close()
+
+
+def _get_gfs_bundle(points: list[Point], hours: int) -> tuple[datetime, Path]:
+    errors: list[str] = []
+    for cycle in _gfs_complete_cycles():
+        try:
+            return cycle, _download_gfs_cycle(cycle, points, hours)
+        except Exception as exc:
+            errors.append(f"{cycle:%Y-%m-%d %H}Z: {exc}")
+    raise RuntimeError("NOAA GFS 공개 자료를 가져오지 못했습니다. " + " | ".join(errors[-3:]))
+
+
 @app.get("/")
 def root():
     return health()
@@ -285,7 +415,9 @@ def health():
         "status": "ok",
         "service": "GTMS ECMWF Open Data Gateway",
         "version": APP_VERSION,
-        "source": "ECMWF Open Data AWS mirror",
+        "source": "ECMWF Open Data + NOAA NOMADS GFS 0.25",
+        "fallback_source": "NOAA NOMADS GFS",
+        "noaa_gfs_filter": NOAA_GFS_FILTER,
         "open_meteo_dependency": False,
         "license": "CC-BY-4.0",
         "forecast_step_hours": 6,
@@ -306,48 +438,50 @@ def forecast(request: ForecastRequest):
         raise HTTPException(status_code=400, detail="지원하지 않는 모델입니다. aifs 또는 ifs를 사용하세요.")
 
     points = request.points
+    source_errors: list[str] = []
     try:
-        # One process-wide lock keeps GRIB downloads and decoding from stampeding.
         with LOCK:
-            cycle, pressure_path, surface_path = _get_bundle(model)
-            now = time.time()
-            cycle_key = cycle.strftime("%Y%m%d%H")
-            keys = [
-                (model, cycle_key, f"{point.lat:.4f}", f"{point.lon:.4f}", request.hours)
-                for point in points
-            ]
-            rows_by_key: dict[tuple, dict] = {}
-            missing_indices: list[int] = []
-            for index, key in enumerate(keys):
-                cached = ROW_CACHE.get(key)
-                if cached and now - cached[0] < ROW_CACHE_TTL:
-                    rows_by_key[key] = cached[1]
-                else:
-                    if cached:
-                        ROW_CACHE.pop(key, None)
-                    missing_indices.append(index)
-
-            if missing_indices:
-                missing_points = [points[index] for index in missing_indices]
-                pressure_fields = _read_fields(pressure_path, missing_points)
-                surface_fields = _read_fields(surface_path, missing_points) if surface_path else {}
-                fresh_rows = _build_rows(
-                    model, cycle, missing_points, pressure_fields, surface_fields, request.hours
+            try:
+                cycle, pressure_path, surface_path = _get_bundle(model)
+                pressure_fields = _read_fields(pressure_path, points)
+                surface_fields = _read_fields(surface_path, points) if surface_path else {}
+                rows = _build_rows(
+                    model, cycle, points, pressure_fields, surface_fields, request.hours
                 )
-                for index, row in zip(missing_indices, fresh_rows):
-                    key = keys[index]
-                    ROW_CACHE[key] = (now, row)
-                    rows_by_key[key] = row
+                # A syntactically valid GRIB may still contain no usable requested fields.
+                if not any(
+                    row.get("hourly", {}).get("wind_speed_250hPa")
+                    and any(value is not None for value in row["hourly"]["wind_speed_250hPa"])
+                    for row in rows
+                ):
+                    raise RuntimeError("ECMWF 자료에서 항공 고도 바람 변수를 찾지 못했습니다.")
+                for row in rows:
+                    row["source"] = "ECMWF " + model.upper()
+                return rows
+            except Exception as exc:
+                source_errors.append(f"ECMWF: {type(exc).__name__}: {exc}")
 
-            # Keep the in-memory cache bounded on the small free instance.
-            if len(ROW_CACHE) > 25000:
-                oldest = sorted(ROW_CACHE.items(), key=lambda item: item[1][0])
-                for key, _ in oldest[: max(1, len(ROW_CACHE) - 18000)]:
-                    ROW_CACHE.pop(key, None)
-
-            return [rows_by_key[key] for key in keys]
+            # Independent fallback: NOAA's official GFS 0.25-degree GRIB filter.
+            try:
+                cycle, gfs_path = _get_gfs_bundle(points, request.hours)
+                fields = _read_fields(gfs_path, points)
+                rows = _build_rows("gfs", cycle, points, fields, fields, request.hours)
+                usable = [
+                    row for row in rows
+                    if any(value is not None for value in row["hourly"]["wind_speed_250hPa"])
+                ]
+                if not usable:
+                    raise RuntimeError(
+                        "GFS GRIB에서 U/V 바람 자료를 찾지 못했습니다. 요청 변수·고도 조합을 확인해야 합니다."
+                    )
+                for row in rows:
+                    row["source"] = "NOAA GFS 0.25°"
+                return rows
+            except Exception as exc:
+                source_errors.append(f"NOAA GFS: {type(exc).__name__}: {exc}")
+                raise RuntimeError("모든 공개 기상자료 수신에 실패했습니다. " + " | ".join(source_errors)) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"ECMWF {model.upper()} 자료 처리 실패: {exc}",
+            detail=f"기상자료 처리 실패: {exc}",
         ) from exc
