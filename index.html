@@ -112,7 +112,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
  </section>
  <section class="panel">
   <h2>DATA SOURCES / STATUS</h2><div id="feedStatus">브라우저 외부 기상자료 연결 준비 중…</div>
-  <div class="hint">NOAA Aviation Weather API · Cloudflare Worker · Open-Meteo ECMWF IFS · OpenStreetMap</div>
+  <div class="hint">NOAA Aviation Weather API · Cloudflare Worker · ECMWF Open Data AWS · GTMS Weather Gateway · OpenStreetMap</div>
  </section>
 </aside>
 <main>
@@ -499,26 +499,23 @@ function buildAiGrid(){
  }
  return {points,north,south,west,east,rows,cols};
 }
+const GTMS_WEATHER_API_URL='https://gtms-weather-api.onrender.com';
 async function fetchEcmwfGrid(model,points,horizon){
- const hourly=[
-  'wind_speed_300hPa','wind_speed_250hPa','wind_speed_200hPa',
-  'wind_direction_300hPa','wind_direction_250hPa','wind_direction_200hPa',
-  'temperature_300hPa','temperature_250hPa','temperature_200hPa',
-  'geopotential_height_300hPa','geopotential_height_250hPa','geopotential_height_200hPa',
-  'cape','precipitation','cloud_cover','vertical_velocity_500hPa'
- ];
- const params=new URLSearchParams({
-  latitude:points.map(p=>p.lat).join(','),
-  longitude:points.map(p=>p.lon).join(','),
-  hourly:hourly.join(','),
-  models:model,
-  forecast_hours:String(Math.min(120,horizon+24)),
-  timezone:'UTC',
-  wind_speed_unit:'ms',
-  temperature_unit:'celsius'
+ const modelName=model==='ecmwf_aifs025_single'?'aifs':'ifs';
+ const response=await fetch(GTMS_WEATHER_API_URL+'/api/forecast',{
+  method:'POST',
+  headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({
+   model:modelName,
+   points:points.map(p=>({lat:Number(p.lat),lon:Number(p.lon)})),
+   hours:Math.min(48,Math.max(6,Number(horizon)||48))
+  })
  });
- const response=await getJSON('https://api.open-meteo.com/v1/ecmwf?'+params.toString());
- return modelPointRows(response,points.length);
+ const raw=await response.text();
+ let data;
+ try{data=raw?JSON.parse(raw):[]}catch{throw Error('GTMS ECMWF 서버가 올바르지 않은 응답을 반환했습니다: '+raw.slice(0,160))}
+ if(!response.ok)throw Error(data.detail||('GTMS ECMWF 서버 오류 HTTP '+response.status));
+ return modelPointRows(data,points.length);
 }
 async function fetchEcmwfGridCached(model,points,horizon){
  const now=Date.now();
@@ -533,20 +530,10 @@ async function fetchEcmwfGridCached(model,points,horizon){
   missing.push({key,point});
  }
  if(missing.length){
-  if(aiModelQuotaBlocked.has(model)){
-   throw Error(model+' 일일 요청 한도 초과가 확인되어 이 세션에서는 재요청을 중단했습니다. Open-Meteo 한도 초기화 후 다시 접속하세요.');
-  }
-  try{
-   const fresh=await fetchEcmwfGrid(model,missing.map(item=>item.point),horizon);
-   fresh.forEach((row,index)=>aiModelPointCache.set(missing[index].key,{row,savedAt:Date.now()}));
-   aiCacheStats.requests++;
-   aiCacheStats.fetchedPoints+=missing.length;
-  }catch(error){
-   if(/Daily API request limit exceeded|daily.*request.*limit/i.test(String(error?.message||error))){
-    aiModelQuotaBlocked.add(model);
-   }
-   throw error;
-  }
+  const fresh=await fetchEcmwfGrid(model,missing.map(item=>item.point),horizon);
+  fresh.forEach((row,index)=>aiModelPointCache.set(missing[index].key,{row,savedAt:Date.now()}));
+  aiCacheStats.requests++;
+  aiCacheStats.fetchedPoints+=missing.length;
  }
  aiCacheStats.reusedPoints+=unique.size-missing.length;
  return points.map(p=>aiModelPointCache.get(keyFor(p))?.row||null);
@@ -637,13 +624,8 @@ async function refreshAiGrid(force=false){
    ((aifsError||ifsError)?'<br><span style="color:#fcd34d">일부 모델 조회 실패, 수신 가능한 모델 자료로 대체: '+esc((aifsError||ifsError).message)+'</span>':'');
   $('lastUpdate').textContent='AI 예보 유효: '+(validTime||'--')+' UTC';
  }catch(error){
-  const quotaExceeded=/Daily API request limit exceeded|일일 요청 한도 초과/i.test(String(error?.message||error));
-  $('aiSummary').innerHTML=quotaExceeded
-   ? '<span style="color:#fca5a5">● Open-Meteo 일일 API 요청 한도 초과</span><br>'+
-     'AIFS / IFS 자료 제공 서버가 오늘의 요청을 더 이상 받지 않습니다. 새로고침을 반복해도 해결되지 않습니다.'+
-     '<br>한도 초기화 후 다시 접속해 주세요. 이 페이지에서는 해당 모델의 자동 재요청을 중단했습니다.'+
-     '<br><span class="hint">'+esc(error.message)+'</span>'
-   : '<span style="color:#fca5a5">● AI 위험기상 조회 실패: '+esc(error.message)+'</span>';
+  $('aiSummary').innerHTML='<span style="color:#fca5a5">● GTMS 자체 ECMWF 자료 수신 실패: '+esc(error.message)+'</span><br>'+
+   '서버 상태 또는 ECMWF Open Data 자료 배포 여부를 확인하세요.';
  }finally{
   aiBusy=false;
   if(button)button.disabled=false;
@@ -915,9 +897,9 @@ async function refreshFeeds(){
   statuses.push('<span style="color:#fcd34d">● Cloudflare Worker 주소 설정 대기</span>');
  }
 
- feedRows.push('<tr><td>Open-Meteo / ECMWF IFS</td><td>항로 분석 시 직접 조회</td><td><a href="https://open-meteo.com/en/docs/ecmwf-api" target="_blank" rel="noopener">자료 안내</a></td></tr>');
+ feedRows.push('<tr><td>ECMWF AIFS / IFS Open Data</td><td>GTMS 자체 서버 · AWS 원자료</td><td><a href="https://www.ecmwf.int/en/forecasts/datasets/open-data" target="_blank" rel="noopener">공식 자료</a></td></tr>');
  $('feedTable').innerHTML='<table><tr><th>자료</th><th>상태</th><th>조회</th></tr>'+feedRows.join('')+'</table>';
- statuses.push('<span style="color:#86efac">● Open-Meteo ECMWF IFS: 항로 분석 시 브라우저 직접 조회</span>');
+ statuses.push('<span style="color:#86efac">● ECMWF AIFS / IFS: GTMS 자체 서버에서 원자료 수신</span>');
  statuses.push('<span style="color:#9bb5c7">PIREP/AIREP 자료 범위는 주로 미국·북대서양이며 전 세계를 완전히 포괄하지 않습니다.</span>');
  setFeed(statuses.join('<br>'));
  $('lastUpdate').textContent='마지막 갱신: '+new Date().toISOString().slice(11,19)+' UTC';
@@ -926,58 +908,47 @@ async function refreshFeeds(){
  if($('showPirep').checked)pirepLayer.addTo(map);else map.removeLayer(pirepLayer);
 }
 function interpolate(a,b,t){return {lat:a.lat+(b.lat-a.lat)*t,lon:a.lon+(b.lon-a.lon)*t}}
-async function fetchDirectForecast(point,altFt,hours){
- const levels={20000:[500,400],25000:[400,300],30000:[300,250],35000:[250,200],39000:[200,150],41000:[200,150]};
- const keysAlt=Object.keys(levels);
- const selected=keysAlt.reduce((best,k)=>Math.abs(Number(k)-altFt)<Math.abs(Number(best)-altFt)?k:best,keysAlt[0]);
- const [lo,hi]=levels[selected];
- const hourly=[`wind_speed_${lo}hPa`,`wind_speed_${hi}hPa`,`wind_direction_${lo}hPa`,`wind_direction_${hi}hPa`];
- const params=new URLSearchParams({
-  latitude:String(point.lat),longitude:String(point.lon),hourly:hourly.join(','),
-  forecast_days:'2',timezone:'UTC',models:'ecmwf_ifs025',wind_speed_unit:'ms'
- });
- const data=await getJSON('https://api.open-meteo.com/v1/forecast?'+params.toString());
- const h=data.hourly||{},times=h.time||[];
- if(!times.length)throw Error('Open-Meteo 예보자료가 없습니다.');
- let first=times.findIndex(t=>new Date(t+':00Z').getTime()>=Date.now());
- if(first<0)first=0;
- const last=Math.min(times.length-1,first+Math.max(1,Number(hours)||48)-1);
- let best=null;
- for(let i=first;i<=last;i++){
-  const s1=h[hourly[0]]?.[i],s2=h[hourly[1]]?.[i],d1=h[hourly[2]]?.[i],d2=h[hourly[3]]?.[i];
-  if([s1,s2,d1,d2].some(v=>v===null||v===undefined||!Number.isFinite(Number(v))))continue;
-  const u1=-s1*Math.sin(d1*Math.PI/180),v1=-s1*Math.cos(d1*Math.PI/180);
-  const u2=-s2*Math.sin(d2*Math.PI/180),v2=-s2*Math.cos(d2*Math.PI/180);
-  const shear=Math.hypot(u2-u1,v2-v1);
-  if(!best||shear>best.shear)best={shear,wind:s1,dir:d1,time:times[i]};
- }
- if(!best)throw Error('선택 고도층의 바람 자료가 없습니다.');
- const score=best.shear>=25?4:best.shear>=18?3:best.shear>=12?2:best.shear>=7?1:0;
- return {time:best.time,wind:Math.round(best.wind*10)/10,dir:best.dir,
-  shear:Math.round(best.shear*10)/10,score,
-  category:['낮음','낮음','주의','높음','매우 높음'][score],
-  source:'Open-Meteo ECMWF IFS 0.25° · wind-vector shear screening'};
-}
 async function assessRoute(){
  if(currentRoute.length<2)return;
  const samples=[];
- for(let i=0;i<currentRoute.length-1;i++){for(let j=0;j<2;j++)samples.push(interpolate(currentRoute[i],currentRoute[i+1],j/2))}
+ for(let i=0;i<currentRoute.length-1;i++){
+  for(let j=0;j<2;j++)samples.push(interpolate(currentRoute[i],currentRoute[i+1],j/2));
+ }
  samples.push(currentRoute[currentRoute.length-1]);
  const unique=samples.filter((p,i)=>i%Math.max(1,Math.ceil(samples.length/10))===0);
  if(unique[unique.length-1]!==samples[samples.length-1])unique.push(samples[samples.length-1]);
- const rows=[],alt=Number($('altitude').value)||35000,hours=Number($('horizon').value)||48;
- $('routeRows').innerHTML='<tr><td colspan="5">ECMWF 예보자료를 직접 조회하고 있습니다…</td></tr>';
- for(let i=0;i<unique.length;i++){
-  try{const result=await fetchDirectForecast(unique[i],alt,hours);rows.push({p:unique[i],...result})}
-  catch(e){rows.push({p:unique[i],score:null,category:'자료없음',error:e.message})}
-  $('routeRows').innerHTML=`<tr><td colspan="5">조회 진행 중: ${i+1}/${unique.length}</td></tr>`;
+ const hours=Number($('horizon').value)||48;
+ $('routeRows').innerHTML='<tr><td colspan="5">GTMS 자체 ECMWF 서버에서 항로 예보자료를 조회하고 있습니다…</td></tr>';
+ let rows=[];
+ try{
+  aiCacheStats={requests:0,fetchedPoints:0,reusedPoints:0};
+  const modelRows=await fetchEcmwfGridCached('ecmwf_ifs025',unique,hours);
+  rows=unique.map((point,index)=>{
+   const result=evaluateModelPoint(modelRows[index],hours,Number($('aiForecastHour').value)||0,Number($('windPressure').value)||250);
+   const cat=result?.cat,conv=result?.convective;
+   const indexValue=Math.max(cat?.index??-1,conv?.index??-1);
+   if(indexValue<0)return {p:point,score:null,category:'자료없음',error:'유효한 CAT/대류성 지표 없음'};
+   const score=indexValue>=85?4:indexValue>=70?3:indexValue>=50?2:indexValue>=30?1:0;
+   const flow=result?.selected?.flow;
+   return {
+    p:point,score,category:['낮음','주의','높음','매우 높음','매우 높음'][score],
+    time:cat?.time||conv?.time||result?.selected?.time||'-',
+    wind:flow?.speed??null,dir:flow?.direction??null,
+    shear:cat?.shearMsKm??result?.selected?.shearMsKm??null,
+    catIndex:cat?.index??null,convectiveIndex:conv?.index??null
+   };
+  });
+ }catch(error){
+  rows=unique.map(point=>({p:point,score:null,category:'자료없음',error:error.message}));
  }
- routeAssessments=rows;renderAssessment();
+ routeAssessments=rows;
+ renderAssessment();
  const failures=rows.filter(r=>r.score===null).length;
+ const valid=rows.length-failures;
  setFeed(
-  '<span style="color:#86efac">● Open-Meteo ECMWF IFS: 항로 분석 완료</span><br>'+
-  `조회 지점 ${rows.length}개 · 자료 누락 ${failures}개 · ${hours}시간 범위`+
-  '<br><span style="color:#fcd34d">NOAA SIGMET/PIREP 자동 지도표시는 CORS 제한으로 사용할 수 없습니다.</span>'
+  '<span style="color:'+(failures?'#fcd34d':'#86efac')+'">● ECMWF Open Data AWS: 항로 분석 '+(failures?'부분':'')+'완료</span><br>'+
+  '조회 지점 '+rows.length+'개 · 유효 '+valid+'개 · 자료 누락 '+failures+'개 · '+hours+'시간 범위'+
+  '<br><span style="color:#9bb5c7">AIFS / IFS 원자료 · GTMS 자체 서버 처리</span>'
  );
 }
 function renderAssessment(){
@@ -1010,7 +981,7 @@ function renderAssessment(){
    }).bindPopup(
     `<b>난기류 위험구역 · ${riskLabel(level)}</b><br>`+
     `분석 지점: ${i+1}<br>고도: FL${Math.round(Number($('altitude').value)/100)}<br>`+
-    `수직층 바람벡터 차이: ${r.shear??'-'} m/s<br>`+
+    `수직시어: ${r.shear??'-'} m/s/km<br>`+
     `자료 시각: ${r.time??'-'}<br>`+
     `표시 반경: ${Math.round(radius/1000)} km`
    ).addTo(riskLayer);
@@ -1029,7 +1000,7 @@ function renderAssessment(){
    L.polyline(positions,{color,weight:7,opacity:.95,lineCap:'round',lineJoin:'round'})
     .bindPopup(
      `<b>난기류 위험구간 · ${riskLabel(level)}</b><br>`+
-     `풍속: ${r.wind??'-'} m/s<br>수직층 바람벡터 차이: ${r.shear??'-'} m/s`
+     `풍속: ${r.wind??'-'} m/s<br>수직시어: ${r.shear??'-'} m/s/km`
     ).addTo(riskLayer);
   });
  }
@@ -1043,7 +1014,7 @@ function renderAssessment(){
  rows.forEach((r,i)=>{
   const score=r.score;
   const badgeClass=score===null||score===undefined?'b-blue':score>=4?'b-red':score===3?'b-orange':score===2?'b-yellow':score===1?'b-green':'b-blue';
-  html+=`<tr><td>${i+1}</td><td>${r.p.lat.toFixed(2)}, ${r.p.lon.toFixed(2)}</td><td>FL${Math.round(Number($('altitude').value)/100)}</td><td><span class="badge ${badgeClass}">${r.category||'자료없음'}</span></td><td>${r.shear!=null?'풍속차 '+r.shear+' m/s':esc(r.error||'자료 없음')}</td></tr>`;
+  html+=`<tr><td>${i+1}</td><td>${r.p.lat.toFixed(2)}, ${r.p.lon.toFixed(2)}</td><td>FL${Math.round(Number($('altitude').value)/100)}</td><td><span class="badge ${badgeClass}">${r.category||'자료없음'}</span></td><td>${r.shear!=null?'수직시어 '+r.shear+' m/s/km':esc(r.error||'자료 없음')}</td></tr>`;
  });
  $('routeRows').innerHTML=html||'<tr><td colspan="5">분석 결과가 없습니다.</td></tr>';
 }
