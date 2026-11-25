@@ -93,7 +93,8 @@ def _retrieve(model: str, cycle: datetime, part: str) -> Path:
     else:
         request.update({
             "levtype": "sfc",
-            "param": ["cape", "tp", "tcc"],
+            # IFS distributes most-unstable CAPE; AIFS exposes precipitation and cloud cover.
+            "param": (["mucape", "tp", "tcc"] if model == "ifs" else ["tp", "tcc"]),
         })
 
     temp_path = path.with_suffix(".part")
@@ -115,13 +116,12 @@ def _get_bundle(model: str) -> tuple[datetime, Path, Path | None]:
         try:
             pressure = _retrieve(model, cycle, "pressure")
             surface: Path | None = None
-            if model == "ifs":
-                try:
-                    surface = _retrieve(model, cycle, "surface")
-                except Exception:
-                    # Pressure-level CAT fields remain usable if surface convective fields
-                    # are temporarily absent from a newly disseminated cycle.
-                    surface = None
+            try:
+                surface = _retrieve(model, cycle, "surface")
+            except Exception:
+                # Pressure-level CAT fields remain usable if surface convective fields
+                # are temporarily absent from a newly disseminated cycle.
+                surface = None
             return cycle, pressure, surface
         except Exception as exc:
             errors.append(f"{cycle:%Y-%m-%d %H}Z: {exc}")
@@ -211,13 +211,15 @@ def _build_rows(
                 )
 
             omega = _field(pressure_fields, "w", 500, step, point_index)
-            cape = _field(surface_fields, "cape", 0, step, point_index)
+            cape = _field(surface_fields, "mucape", 0, step, point_index)
             tp = _field(surface_fields, "tp", 0, step, point_index)
             cloud = _field(surface_fields, "tcc", 0, step, point_index)
+            # ECMWF total cloud cover is stored as a 0–1 fraction; GTMS expects percent.
+            cloud_percent = cloud * 100.0 if cloud is not None and 0.0 <= cloud <= 1.0 else cloud
 
             hourly["vertical_velocity_500hPa"].append(round(omega, 6) if omega is not None else None)
             hourly["cape"].append(round(cape, 2) if cape is not None else None)
-            hourly["cloud_cover"].append(round(cloud, 2) if cloud is not None else None)
+            hourly["cloud_cover"].append(round(cloud_percent, 2) if cloud_percent is not None else None)
 
             precipitation = None
             if tp is not None:
@@ -233,6 +235,11 @@ def _build_rows(
 
         rows.append({"hourly": hourly})
     return rows
+
+
+@app.get("/")
+def root():
+    return health()
 
 
 @app.get("/health")
