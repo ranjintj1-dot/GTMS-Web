@@ -10,7 +10,7 @@ from typing import Any
 
 from eccodes import (
     codes_get,
-    codes_grib_find_nearest,
+    codes_grib_find_nearest_multiple,
     codes_grib_new_from_file,
     codes_release,
 )
@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 APP_VERSION = "1.0.0"
 CACHE_DIR = Path(os.getenv("GTMS_GRIB_CACHE", "/tmp/gtms-ecmwf"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-FORECAST_STEPS = list(range(0, 73, 6))
+FORECAST_STEPS = list(range(0, 49, 6))
 PRESSURE_LEVELS = [200, 250, 300, 500]
 LOCK = threading.RLock()
 ROW_CACHE: dict[tuple[str, str, str, str, int], tuple[float, dict]] = {}
@@ -55,7 +55,7 @@ class Point(BaseModel):
 class ForecastRequest(BaseModel):
     model: str
     points: list[Point] = Field(min_length=1, max_length=84)
-    hours: int = Field(default=72, ge=6, le=72)
+    hours: int = Field(default=48, ge=6, le=48)
 
 
 def _run_candidates() -> list[datetime]:
@@ -79,7 +79,6 @@ def _retrieve(model: str, cycle: datetime, part: str) -> Path:
         path.unlink(missing_ok=True)
 
     source_model = "aifs-single" if model == "aifs" else "ifs"
-    client = Client(source="aws", model=source_model, resol="0p25")
     request: dict[str, Any] = {
         "date": cycle.strftime("%Y%m%d"),
         "time": cycle.hour,
@@ -96,22 +95,39 @@ def _retrieve(model: str, cycle: datetime, part: str) -> Path:
     else:
         request.update({
             "levtype": "sfc",
-            # IFS distributes most-unstable CAPE; AIFS exposes precipitation and cloud cover.
+            # AIFS does not publish MUCAPE; IFS does. Both publish TP and TCC.
             "param": (["mucape", "tp", "tcc"] if model == "ifs" else ["tp", "tcc"]),
         })
 
     temp_path = path.with_suffix(".part")
-    temp_path.unlink(missing_ok=True)
-    try:
-        client.retrieve(request=request, target=str(temp_path))
-        if not temp_path.exists() or temp_path.stat().st_size < 1000:
-            raise RuntimeError("ECMWF에서 비어 있거나 불완전한 GRIB 파일을 받았습니다.")
-        temp_path.replace(path)
-    except Exception:
+    errors: list[str] = []
+    # The first AWS mirror may temporarily return HTTP 503. Do not let the
+    # library's default 500 retries × 120 seconds leave browser requests pending.
+    # Try the other official ECMWF mirrors with one short retry each.
+    for source in ("aws", "google", "azure", "ecmwf"):
         temp_path.unlink(missing_ok=True)
-        raise
-    return path
+        try:
+            client = Client(
+                source=source,
+                model=source_model,
+                resol="0p25",
+                maximum_retries=1,
+                retry_after=3,
+                use_server_retry_after=False,
+            )
+            client.retrieve(request=request, target=str(temp_path))
+            if not temp_path.exists() or temp_path.stat().st_size < 1000:
+                raise RuntimeError("ECMWF에서 비어 있거나 불완전한 GRIB 파일을 받았습니다.")
+            temp_path.replace(path)
+            return path
+        except Exception as exc:
+            errors.append(f"{source}: {type(exc).__name__}: {exc}")
+            temp_path.unlink(missing_ok=True)
 
+    raise RuntimeError(
+        "ECMWF 미러(AWS/Google/Azure/ECMWF)에서 자료를 받지 못했습니다. "
+        + " | ".join(errors[-4:])
+    )
 
 def _get_bundle(model: str) -> tuple[datetime, Path, Path | None]:
     errors: list[str] = []
@@ -149,10 +165,15 @@ def _read_fields(path: Path, points: list[Point]) -> dict[tuple[str, int, int], 
                     missing_value = float(codes_get(gid, "missingValue"))
                 except Exception:
                     missing_value = float("nan")
+                nearest = codes_grib_find_nearest_multiple(
+                    gid,
+                    False,
+                    [point.lat for point in points],
+                    [point.lon for point in points],
+                )
                 values: list[float | None] = []
-                for point in points:
-                    nearest = codes_grib_find_nearest(gid, point.lat, point.lon)
-                    value = float(nearest[0]["value"])
+                for item in nearest:
+                    value = float(item.value)
                     is_missing = (
                         not math.isfinite(value)
                         or (math.isfinite(missing_value) and value == missing_value)
@@ -268,7 +289,9 @@ def health():
         "open_meteo_dependency": False,
         "license": "CC-BY-4.0",
         "forecast_step_hours": 6,
-        "forecast_coverage_hours": 72,
+        "forecast_coverage_hours": 48,
+        "mirror_fallbacks": ["aws", "google", "azure", "ecmwf"],
+        "retry_policy": {"maximum_retries": 1, "retry_after_seconds": 3},
     }
 
 
