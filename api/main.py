@@ -344,20 +344,18 @@ def _download_gfs_cycle(cycle: datetime, points: list[Point], hours: int) -> Pat
                     "rightlon": f"{right:.2f}",
                     "toplat": f"{top:.2f}",
                     "bottomlat": f"{bottom:.2f}",
+                    # Keep the first request to the primary pressure-level fields.
+                    # Surface/secondary parameters are fetched separately so one invalid
+                    # combination cannot make the whole upper-air GRIB request fail.
                     "var_UGRD": "on",
                     "var_VGRD": "on",
                     "var_TMP": "on",
                     "var_HGT": "on",
                     "var_VVEL": "on",
-                    "var_CAPE": "on",
-                    "var_APCP": "on",
-                    "var_TCDC": "on",
                     "lev_200_mb": "on",
                     "lev_250_mb": "on",
                     "lev_300_mb": "on",
                     "lev_500_mb": "on",
-                    "lev_surface": "on",
-                    "lev_entire_atmosphere_single_layer": "on",
                 }
                 try:
                     response = session.get(
