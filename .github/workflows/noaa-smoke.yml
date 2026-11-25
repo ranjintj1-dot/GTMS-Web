@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - "api/**"
+      - "noaa-proxy-config.js"
+      - "index.html"
   workflow_dispatch:
 
 permissions:
@@ -23,14 +25,14 @@ jobs:
           ready=0
           for attempt in $(seq 1 60); do
             code="$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 20 "$BASE/health" || true)"
-            if [ "$code" = "200" ] && grep -q '"version":"1.0.8"' /tmp/health.json && grep -q '"release":"gtms-noaa-primary-20261125-r5"' /tmp/health.json; then
+            if [ "$code" = "200" ] && grep -q '"version":"1.0.9"' /tmp/health.json && grep -q '"release":"gtms-noaa-primary-20261126-aviation-proxy-r1"' /tmp/health.json; then
               ready=1
               break
             fi
             sleep 10
           done
           if [ "$ready" != "1" ]; then
-            echo "GTMS weather gateway did not deploy the expected version 1.0.8"
+            echo "GTMS weather gateway did not deploy the expected version 1.0.9"
             cat /tmp/health.json 2>/dev/null || true
             exit 1
           fi
@@ -55,6 +57,30 @@ jobs:
           grep -qi '^access-control-allow-origin: https://gtms-static.onrender.com' /tmp/cors-headers.txt
           echo "PASS: browser POST preflight accepted for GTMS static site."
 
+      - name: Validate NOAA SIGMET and PIREP proxy endpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="https://gtms-weather-api.onrender.com"
+          for product in sigmets pireps; do
+            CODE="$(curl -sS -D "/tmp/$product.headers" -o "/tmp/$product.json" -w '%{http_code}' --max-time 60 "$BASE/api/$product" || true)"
+            cat "/tmp/$product.headers"
+            if [ "$CODE" != "200" ]; then
+              cat "/tmp/$product.json"
+              echo "GTMS NOAA $product endpoint returned HTTP $CODE"
+              exit 1
+            fi
+            grep -qi '^access-control-allow-origin: https://gtms-static.onrender.com' "/tmp/$product.headers"
+            python - "$product" "/tmp/$product.json" <<'PY'
+          import json
+          import sys
+          product, path = sys.argv[1:]
+          data = json.load(open(path))
+          assert data.get("type") == "FeatureCollection", (product, data)
+          assert isinstance(data.get("features"), list), (product, data)
+          print(f"PASS: {product}: {len(data['features'])} GeoJSON features")
+          PY
+          done
       - name: Download and validate NOAA GFS forecast data
         shell: bash
         run: |

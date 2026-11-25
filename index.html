@@ -100,7 +100,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
   </div>
   <div id="aiSummary" class="hint" style="margin-top:8px">NOAA GFS 0.25° 예보자료 연결 대기 중 · ECMWF 대체자료 자동 전환</div>
   <div class="hint">컬러 레이어: AI 난기류 위험지수. 바람 입자·흐름 애니메이션과 등압선·지위고도 등고선은 표시하지 않습니다.</div><div class="hint">기상자료 출처: NOAA GFS 0.25° (기본) · ECMWF AIFS / IFS (장애 시 대체) · GRIB2</div><div class="hint">위험지수는 EDR 실측값이나 승인된 난기류 예보가 아닌 실험적 선별값입니다.</div>
-  <div class="hint">NOAA SIGMET / PIREP은 Cloudflare Worker 중계로 수신합니다. Worker 주소는 noaa-proxy-config.js에 설정합니다.</div>
+  <div class="hint">NOAA SIGMET / PIREP은 GTMS 기상자료 서버가 NOAA 공식 API에서 직접 중계합니다.</div>
  </section>
  <section class="panel">
   <h2>ALTITUDE FILTER</h2>

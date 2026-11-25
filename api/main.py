@@ -23,8 +23,8 @@ from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-APP_VERSION = "1.0.8"
-APP_RELEASE_ID = "gtms-noaa-primary-20261125-r5"
+APP_VERSION = "1.0.9"
+APP_RELEASE_ID = "gtms-noaa-primary-20261126-aviation-proxy-r1"
 logger = logging.getLogger("uvicorn.error")
 CACHE_DIR = Path(os.getenv("GTMS_GRIB_CACHE", "/tmp/gtms-ecmwf"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -35,6 +35,19 @@ NOAA_GFS_FILTER = "https://noaa-gfs-bdp-pds.s3.amazonaws.com/"
 LOCK = threading.RLock()
 ROW_CACHE: dict[tuple[str, str, str, str, int], tuple[float, dict]] = {}
 ROW_CACHE_TTL = 6 * 3600
+
+# NOAA Aviation Weather Center proxy. The official API disallows browser CORS,
+# so GTMS requests it server-side and shares a short cache across browser clients.
+AVIATION_WEATHER_BASE = "https://aviationweather.gov/api/data"
+AVIATION_WEATHER_PRODUCTS = {
+    "sigmets": f"{AVIATION_WEATHER_BASE}/sigmet?format=geojson",
+    "pireps": f"{AVIATION_WEATHER_BASE}/pirep?format=geojson&age=6",
+}
+AVIATION_WEATHER_CACHE_TTL = 60
+AVIATION_WEATHER_CACHE: dict[str, tuple[float, dict]] = {}
+AVIATION_WEATHER_LOCK = threading.RLock()
+EMPTY_FEATURE_COLLECTION = {"type": "FeatureCollection", "features": []}
+
 
 app = FastAPI(
     title="GTMS ECMWF Open Data Gateway",
@@ -606,8 +619,124 @@ def health():
         "license": "CC-BY-4.0",
         "forecast_step_hours": 6,
         "forecast_coverage_hours": 48,
+        "aviation_weather_proxy": {
+            "provider": "NOAA Aviation Weather Center",
+            "products": ["/api/sigmets", "/api/pireps"],
+            "cache_seconds": AVIATION_WEATHER_CACHE_TTL,
+        },
         "mirror_fallbacks": ["aws", "google", "azure", "ecmwf"],
         "retry_policy": {"maximum_retries": 1, "retry_after_seconds": 3},
+    }
+
+
+def _normalise_aviation_geojson(payload: Any) -> dict:
+    if payload is None or payload == []:
+        return dict(EMPTY_FEATURE_COLLECTION)
+    if isinstance(payload, dict):
+        if payload.get("type") == "FeatureCollection" and isinstance(payload.get("features"), list):
+            return payload
+        if payload.get("type") == "Feature":
+            return {"type": "FeatureCollection", "features": [payload]}
+        if isinstance(payload.get("features"), list):
+            return {"type": "FeatureCollection", "features": payload}
+        if isinstance(payload.get("data"), list):
+            payload = payload["data"]
+        else:
+            raise RuntimeError("NOAA 응답이 GeoJSON FeatureCollection 형식이 아닙니다.")
+    if isinstance(payload, list):
+        features = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "Feature":
+                feature = item
+            else:
+                props = item.get("properties") or item
+                geometry = item.get("geometry")
+                if geometry is None:
+                    try:
+                        lat = float(props.get("lat", props.get("latitude")))
+                        lon = float(props.get("lon", props.get("longitude")))
+                        geometry = {"type": "Point", "coordinates": [lon, lat]}
+                    except (TypeError, ValueError):
+                        geometry = None
+                if geometry is None:
+                    continue
+                feature = {"type": "Feature", "geometry": geometry, "properties": props}
+            features.append(feature)
+        return {"type": "FeatureCollection", "features": features}
+    raise RuntimeError("NOAA 응답 형식을 처리할 수 없습니다.")
+
+
+def _fetch_aviation_weather(product: str) -> dict:
+    if product not in AVIATION_WEATHER_PRODUCTS:
+        raise HTTPException(status_code=404, detail="지원하지 않는 기상자료입니다.")
+
+    now = time.monotonic()
+    with AVIATION_WEATHER_LOCK:
+        cached = AVIATION_WEATHER_CACHE.get(product)
+        if cached and now - cached[0] < AVIATION_WEATHER_CACHE_TTL:
+            return cached[1]
+
+        url = AVIATION_WEATHER_PRODUCTS[product]
+        try:
+            response = requests.get(
+                url,
+                headers={
+                    "Accept": "application/geo+json, application/json",
+                    "User-Agent": "GTMS-Weather-Gateway/1.0 (aviation situational awareness)",
+                },
+                timeout=(10, 35),
+            )
+            if response.status_code == 204:
+                collection = dict(EMPTY_FEATURE_COLLECTION)
+            else:
+                response.raise_for_status()
+                body = response.json() if response.content else EMPTY_FEATURE_COLLECTION
+                collection = _normalise_aviation_geojson(body)
+        except requests.RequestException as exc:
+            logger.exception("NOAA Aviation Weather %s upstream request failed", product)
+            raise HTTPException(
+                status_code=502,
+                detail=f"NOAA Aviation Weather {product.upper()} upstream error: {exc}",
+            ) from exc
+        except (ValueError, RuntimeError) as exc:
+            logger.exception("NOAA Aviation Weather %s payload invalid", product)
+            raise HTTPException(
+                status_code=502,
+                detail=f"NOAA Aviation Weather {product.upper()} payload error: {exc}",
+            ) from exc
+
+        AVIATION_WEATHER_CACHE[product] = (time.monotonic(), collection)
+        logger.info(
+            "NOAA Aviation Weather %s cached: features=%s",
+            product, len(collection.get("features", [])),
+        )
+        return collection
+
+
+@app.get("/api/sigmets")
+def aviation_sigmets():
+    """Current worldwide NOAA SIGMETs as GeoJSON."""
+    return _fetch_aviation_weather("sigmets")
+
+
+@app.get("/api/pireps")
+def aviation_pireps():
+    """Recent six-hour NOAA PIREP/AIREP reports as GeoJSON."""
+    return _fetch_aviation_weather("pireps")
+
+
+@app.get("/api/aviation-weather/health")
+def aviation_weather_health():
+    return {
+        "status": "ok",
+        "service": "GTMS NOAA Aviation Weather proxy",
+        "products": {
+            "sigmets": {"path": "/api/sigmets", "upstream": AVIATION_WEATHER_PRODUCTS["sigmets"]},
+            "pireps": {"path": "/api/pireps", "upstream": AVIATION_WEATHER_PRODUCTS["pireps"]},
+        },
+        "cacheSeconds": AVIATION_WEATHER_CACHE_TTL,
     }
 
 
