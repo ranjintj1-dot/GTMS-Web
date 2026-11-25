@@ -637,7 +637,13 @@ async function refreshAiGrid(force=false){
    ((aifsError||ifsError)?'<br><span style="color:#fcd34d">일부 모델 조회 실패, 수신 가능한 모델 자료로 대체: '+esc((aifsError||ifsError).message)+'</span>':'');
   $('lastUpdate').textContent='AI 예보 유효: '+(validTime||'--')+' UTC';
  }catch(error){
-  $('aiSummary').innerHTML='<span style="color:#fca5a5">● AI 위험기상 조회 실패: '+esc(error.message)+'</span>';
+  const quotaExceeded=/Daily API request limit exceeded|일일 요청 한도 초과/i.test(String(error?.message||error));
+  $('aiSummary').innerHTML=quotaExceeded
+   ? '<span style="color:#fca5a5">● Open-Meteo 일일 API 요청 한도 초과</span><br>'+
+     'AIFS / IFS 자료 제공 서버가 오늘의 요청을 더 이상 받지 않습니다. 새로고침을 반복해도 해결되지 않습니다.'+
+     '<br>한도 초기화 후 다시 접속해 주세요. 이 페이지에서는 해당 모델의 자동 재요청을 중단했습니다.'+
+     '<br><span class="hint">'+esc(error.message)+'</span>'
+   : '<span style="color:#fca5a5">● AI 위험기상 조회 실패: '+esc(error.message)+'</span>';
  }finally{
   aiBusy=false;
   if(button)button.disabled=false;
