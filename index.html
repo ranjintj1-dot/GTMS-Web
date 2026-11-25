@@ -94,14 +94,13 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
   <label><input type="checkbox" id="showAiCat"> CAT / 수직시어 단독 레이어</label>
   <label><input type="checkbox" id="showAiConvective"> 대류성 난기류 단독 레이어</label>
   <label><input type="checkbox" id="showWindSpeedHeat"> 바람 속도 컬러필드</label>
-  <label><input type="checkbox" id="showWindFlow" checked> 바람 흐름 애니메이션</label>
   <label><input type="checkbox" id="aiAutoRefresh" checked> 지도 이동 및 주기적 자동 갱신</label>
   <div class="row" style="margin-top:8px">
    <button id="aiRefreshBtn" class="primary">AI 위험기상 분석</button>
    <button id="aiClearBtn">AI 레이어 지우기</button>
   </div>
   <div id="aiSummary" class="hint" style="margin-top:8px">ECMWF AIFS AI + IFS 모델 연결 대기 중</div>
-  <div class="hint">컬러 레이어: AI 난기류 위험지수 · 흰색 입자: 선택 기압면 바람 흐름. 격자 경계와 등압선·지위고도 등고선은 표시하지 않습니다.</div><div class="hint">위험지수는 EDR 실측값이나 승인된 난기류 예보가 아닌 실험적 선별값입니다.</div>
+  <div class="hint">컬러 레이어: AI 난기류 위험지수. 바람 입자·흐름 애니메이션과 등압선·지위고도 등고선은 표시하지 않습니다.</div><div class="hint">위험지수는 EDR 실측값이나 승인된 난기류 예보가 아닌 실험적 선별값입니다.</div>
   <div class="hint">NOAA SIGMET / PIREP은 Cloudflare Worker 중계로 수신합니다. Worker 주소는 noaa-proxy-config.js에 설정합니다.</div>
  </section>
  <section class="panel">
@@ -160,7 +159,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
 <script>
 const NOAA_PROXY_BASE=String(window.GTMS_NOAA_PROXY_URL||'').replace(/\/+$/,'');
 const $=id=>document.getElementById(id);
-let map, routeLayer, riskLayer, sigmetLayer, pirepLayer, aiCatLayer, aiConvectiveLayer, aiCompositeCanvasLayer, aiCatCanvasLayer, aiConvectiveCanvasLayer, aiWindCanvasLayer, aiFlowCanvasLayer, cesiumViewer, currentRoute=[], sigmets=[], pireps=[], routeAssessments=[];
+let map, routeLayer, riskLayer, sigmetLayer, pirepLayer, aiCatLayer, aiConvectiveLayer, aiCompositeCanvasLayer, aiCatCanvasLayer, aiConvectiveCanvasLayer, aiWindCanvasLayer, cesiumViewer, currentRoute=[], sigmets=[], pireps=[], routeAssessments=[];
 let aiGridResults=[], aiGridMeta=null, aiRefreshTimer=null, aiLastRefreshAt=0, aiBusy=false, aiCesiumEntities=[];
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function utcClock(){ $('clock').textContent='UTC '+new Date().toISOString().slice(11,16); }
@@ -169,12 +168,10 @@ map=L.map('map',{worldCopyJump:true}).setView([25,145],3);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'&copy; OpenStreetMap'}).addTo(map);
 routeLayer=L.layerGroup().addTo(map);riskLayer=L.layerGroup().addTo(map);sigmetLayer=L.layerGroup().addTo(map);pirepLayer=L.layerGroup().addTo(map);aiCatLayer=L.layerGroup().addTo(map);aiConvectiveLayer=L.layerGroup().addTo(map);
 map.createPane('aiHeatPane');map.getPane('aiHeatPane').style.zIndex=350;map.getPane('aiHeatPane').style.pointerEvents='none';
-map.createPane('aiFlowPane');map.getPane('aiFlowPane').style.zIndex=430;map.getPane('aiFlowPane').style.pointerEvents='none';
 aiCompositeCanvasLayer=createAiCanvasLayer('composite','aiHeatPane').addTo(map);
 aiCatCanvasLayer=createAiCanvasLayer('cat','aiHeatPane');
 aiConvectiveCanvasLayer=createAiCanvasLayer('convective','aiHeatPane');
 aiWindCanvasLayer=createAiCanvasLayer('wind','aiHeatPane');
-aiFlowCanvasLayer=createAiCanvasLayer('flow','aiFlowPane').addTo(map);
 function setFeed(msg){$('feedStatus').innerHTML=msg}
 async function getJSON(url){
  const response=await fetch(url);
@@ -323,7 +320,6 @@ function createAiCanvasLayer(kind,pane){
  const CanvasLayer=L.Layer.extend({
   initialize:function(){
    this._kind=kind;this._paneName=pane;this._data=[];this._meta=null;
-   this._particles=[];this._raf=null;this._lastFrame=0;
   },
   onAdd:function(mapRef){
    this._map=mapRef;
@@ -335,18 +331,14 @@ function createAiCanvasLayer(kind,pane){
    mapRef.getPane(this._paneName).appendChild(this._canvas);
    mapRef.on('moveend zoomend resize',this._reset,this);
    this._reset();
-   if(this._kind==='flow')this._animate();
   },
   onRemove:function(mapRef){
    mapRef.off('moveend zoomend resize',this._reset,this);
-   if(this._raf)cancelAnimationFrame(this._raf);
-   this._raf=null;this._particles=[];
    if(this._canvas){L.DomUtil.remove(this._canvas);this._canvas=null}
    this._map=null;
   },
   setData:function(data,meta){
    this._data=data||[];this._meta=meta||null;
-   if(this._kind==='flow')this._particles=[];
    if(this._map)this._reset();
   },
   _reset:function(){
@@ -359,8 +351,7 @@ function createAiCanvasLayer(kind,pane){
    L.DomUtil.setPosition(this._canvas,this._map.containerPointToLayerPoint([0,0]));
    this._ctx=this._canvas.getContext('2d');
    this._ctx.setTransform(dpr,0,0,dpr,0,0);
-   if(this._kind!=='flow')this._drawStatic();
-   else{this._particles=[];this._lastFrame=0}
+   this._drawStatic();
   },
   _projectSamples:function(){
    if(!this._map)return [];
@@ -444,55 +435,7 @@ function createAiCanvasLayer(kind,pane){
    ctx.drawImage(off,0,0,sw,sh,0,0,this._width,this._height);
    ctx.restore();
   },
-  _initParticles:function(){
-   const count=Math.max(180,Math.min(520,Math.round(this._width*this._height/3300)));
-   this._particles=Array.from({length:count},()=>({
-    x:Math.random()*this._width,y:Math.random()*this._height,
-    age:Math.random()*130,life:90+Math.random()*130,history:[]
-   }));
-  },
-  _windAt:function(x,y,samples){
-   let u=0,v=0,weightSum=0;
-   for(const sample of samples){
-    const dx=x-sample.x,dy=y-sample.y,d2=dx*dx+dy*dy;
-    const weight=1/Math.pow(d2+650,1.05);
-    u+=sample.item.flowU*weight;v+=sample.item.flowV*weight;weightSum+=weight;
-   }
-   return weightSum?{u:u/weightSum,v:v/weightSum}:null;
-  },
-  _animate:function(){
-   if(!this._map||!this._canvas||this._kind!=='flow')return;
-   if(!this._particles.length)this._initParticles();
-   const now=performance.now();
-   const dt=this._lastFrame?Math.min(0.05,Math.max(0.008,(now-this._lastFrame)/1000)):0.016;
-   this._lastFrame=now;
-   const ctx=this._ctx;ctx.clearRect(0,0,this._width,this._height);
-   const samples=this._projectSamples().filter(s=>Number.isFinite(s.item.flowU)&&Number.isFinite(s.item.flowV));
-   if(samples.length){
-    ctx.lineWidth=1.25;ctx.lineCap='round';ctx.lineJoin='round';
-    const centerLat=this._map.getCenter().lat;
-    const metersPerPixel=156543.03392*Math.max(0.12,Math.cos(centerLat*Math.PI/180))/Math.pow(2,this._map.getZoom());
-    for(const p of this._particles){
-     const wind=this._windAt(p.x,p.y,samples);
-     if(!wind||p.age>p.life||p.x<0||p.y<0||p.x>this._width||p.y>this._height){
-      p.x=Math.random()*this._width;p.y=Math.random()*this._height;
-      p.age=0;p.life=90+Math.random()*130;p.history=[];continue;
-     }
-     const speedScale=1500/Math.max(250,metersPerPixel);
-     const nx=p.x+wind.u*speedScale*dt,ny=p.y-wind.v*speedScale*dt;
-     p.history.push([p.x,p.y]);if(p.history.length>9)p.history.shift();
-     p.x=nx;p.y=ny;p.age++;
-     if(p.history.length>=2){
-      ctx.beginPath();ctx.moveTo(p.history[0][0],p.history[0][1]);
-      for(let k=1;k<p.history.length;k++)ctx.lineTo(p.history[k][0],p.history[k][1]);
-      ctx.lineTo(p.x,p.y);
-      ctx.strokeStyle='rgba(248,252,255,'+(0.18+0.58*p.history.length/9)+')';
-      ctx.stroke();
-     }
-    }
-   }
-   this._raf=requestAnimationFrame(()=>this._animate());
-  }
+
  });
  return new CanvasLayer();
 }
@@ -507,7 +450,7 @@ function drawAiLayers(grid,meta){
   item.radiusM=Math.max(30000,Math.min(450000,111320*0.42*Math.max(latStep,lonStep*cos)));
  });
  [aiCompositeCanvasLayer,aiCatCanvasLayer,aiConvectiveCanvasLayer,
-  aiWindCanvasLayer,aiFlowCanvasLayer]
+  aiWindCanvasLayer]
   .forEach(layer=>layer.setData(grid,meta));
  setCanvasLayerVisibility();
 }
@@ -516,8 +459,7 @@ function setCanvasLayerVisibility(){
   [aiCompositeCanvasLayer,$('showAiRiskHeat').checked],
   [aiCatCanvasLayer,$('showAiCat').checked],
   [aiConvectiveCanvasLayer,$('showAiConvective').checked],
-  [aiWindCanvasLayer,$('showWindSpeedHeat').checked],
-  [aiFlowCanvasLayer,$('showWindFlow').checked]
+  [aiWindCanvasLayer,$('showWindSpeedHeat').checked]
  ];
  pairs.forEach(([layer,visible])=>{
   if(visible){if(!map.hasLayer(layer))layer.addTo(map)}
@@ -729,24 +671,6 @@ function renderAiCesiumLayers(){
  addCesiumRiskOverlay('combinedIndex',$('showAiRiskHeat').checked);
  addCesiumRiskOverlay('mapCatIndex',$('showAiCat').checked);
  addCesiumRiskOverlay('mapConvectiveIndex',$('showAiConvective').checked);
-
- // Keep a sparse vector reference in 3D without drawing grid-cell boundaries.
- if($('showWindFlow').checked){
-  aiGridResults.forEach((item,index)=>{
-   if(index%2!==0||!Number.isFinite(item.flowU)||!Number.isFinite(item.flowV))return;
-   const lat=item.point.lat,lon=item.point.displayLon??item.point.lon;
-   const length=25000;
-   const endLat=lat+item.flowV*length/111320;
-   const endLon=lon+item.flowU*length/(111320*Math.max(0.15,Math.cos(lat*Math.PI/180)));
-   const entity=cesiumViewer.entities.add({
-    polyline:{
-     positions:Cesium.Cartesian3.fromDegreesArrayHeights([lon,lat,10000,endLon,endLat,10000]),
-     width:1.5,material:Cesium.Color.WHITE.withAlpha(0.68)
-    }
-   });
-   aiCesiumEntities.push(entity);
-  });
- }
 }
 function scheduleAiRefresh(){
  if(!$('aiAutoRefresh')?.checked)return;
@@ -1038,12 +962,12 @@ function renderAssessment(){
 $('aiRefreshBtn').onclick=()=>refreshAiGrid(true);
 $('aiClearBtn').onclick=()=>{
  aiGridResults=[];
- [aiCompositeCanvasLayer,aiCatCanvasLayer,aiConvectiveCanvasLayer,aiWindCanvasLayer,aiFlowCanvasLayer]
+ [aiCompositeCanvasLayer,aiCatCanvasLayer,aiConvectiveCanvasLayer,aiWindCanvasLayer]
   .forEach(layer=>layer.setData([],null));
  aiCatLayer.clearLayers();aiConvectiveLayer.clearLayers();renderAiCesiumLayers();
  $('aiSummary').textContent='AI 기상 레이어를 지웠습니다.';
 };
-['showAiRiskHeat','showAiCat','showAiConvective','showWindSpeedHeat','showWindFlow'].forEach(id=>{
+['showAiRiskHeat','showAiCat','showAiConvective','showWindSpeedHeat'].forEach(id=>{
  $(id).onchange=()=>{setCanvasLayerVisibility();renderAiCesiumLayers()};
 });
 $('aiModel').onchange=()=>refreshAiGrid(true);
