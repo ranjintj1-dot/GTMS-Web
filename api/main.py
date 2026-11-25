@@ -22,7 +22,7 @@ from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 logger = logging.getLogger("uvicorn.error")
 CACHE_DIR = Path(os.getenv("GTMS_GRIB_CACHE", "/tmp/gtms-ecmwf"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -507,8 +507,8 @@ def health():
         "status": "ok",
         "service": "GTMS ECMWF Open Data Gateway",
         "version": APP_VERSION,
-        "source": "ECMWF Open Data + NOAA GFS BDP public S3",
-        "fallback_source": "NOAA GFS BDP S3 0.25 degree",
+        "source": "NOAA GFS BDP public S3 0.25 degree (primary)",
+        "backup_source": "ECMWF AIFS / IFS Open Data",
         "noaa_gfs_source": "NOAA GFS BDP public S3 + .idx byte-range retrieval",
         "open_meteo_dependency": False,
         "license": "CC-BY-4.0",
@@ -522,59 +522,53 @@ def health():
 @app.post("/api/forecast")
 def forecast(request: ForecastRequest):
     model_alias = request.model.strip().lower()
-    if model_alias in ("ecmwf_aifs025_single", "aifs", "aifs-single"):
-        model = "aifs"
-    elif model_alias in ("ecmwf_ifs025", "ifs"):
-        model = "ifs"
-    else:
+    if model_alias not in ("ecmwf_aifs025_single", "aifs", "aifs-single", "ecmwf_ifs025", "ifs"):
         raise HTTPException(status_code=400, detail="지원하지 않는 모델입니다. aifs 또는 ifs를 사용하세요.")
 
     points = request.points
     source_errors: list[str] = []
-    try:
-        with LOCK:
-            try:
-                cycle, pressure_path, surface_path = _get_bundle(model)
-                pressure_fields = _read_fields(pressure_path, points)
-                surface_fields = _read_fields(surface_path, points) if surface_path else {}
-                rows = _build_rows(
-                    model, cycle, points, pressure_fields, surface_fields, request.hours
-                )
-                # A syntactically valid GRIB may still contain no usable requested fields.
-                if not any(
-                    row.get("hourly", {}).get("wind_speed_250hPa")
-                    and any(value is not None for value in row["hourly"]["wind_speed_250hPa"])
-                    for row in rows
-                ):
-                    raise RuntimeError("ECMWF 자료에서 항공 고도 바람 변수를 찾지 못했습니다.")
-                for row in rows:
-                    row["source"] = "ECMWF " + model.upper()
-                return rows
-            except Exception as exc:
-                source_errors.append(f"ECMWF: {type(exc).__name__}: {exc}")
+    with LOCK:
+        # Primary source: NOAA GFS public S3. The .idx byte-range reader fetches
+        # only upper-air messages, so the first forecast is not blocked by a
+        # large ECMWF download or a third-party daily API quota.
+        try:
+            cycle, gfs_path = _get_gfs_bundle(points, request.hours)
+            fields = _read_fields(gfs_path, points)
+            rows = _build_rows("gfs", cycle, points, fields, fields, request.hours)
+            if not any(
+                any(value is not None for value in row["hourly"].get("wind_speed_250hPa", []))
+                and any(value is not None for value in row["hourly"].get("wind_speed_300hPa", []))
+                for row in rows
+            ):
+                raise RuntimeError("GFS GRIB에서 250/300 hPa 바람값을 찾지 못했습니다.")
+            for row in rows:
+                row["source"] = "NOAA GFS BDP S3 0.25°"
+            return rows
+        except Exception as exc:
+            logger.exception("Primary NOAA GFS BDP S3 forecast failed")
+            source_errors.append(f"NOAA GFS BDP S3: {type(exc).__name__}: {exc}")
 
-            # Independent fallback: NOAA's official GFS 0.25-degree GRIB filter.
-            try:
-                cycle, gfs_path = _get_gfs_bundle(points, request.hours)
-                fields = _read_fields(gfs_path, points)
-                rows = _build_rows("gfs", cycle, points, fields, fields, request.hours)
-                usable = [
-                    row for row in rows
-                    if any(value is not None for value in row["hourly"]["wind_speed_250hPa"])
-                ]
-                if not usable:
-                    raise RuntimeError(
-                        "GFS GRIB에서 U/V 바람 자료를 찾지 못했습니다. 요청 변수·고도 조합을 확인해야 합니다."
-                    )
-                for row in rows:
-                    row["source"] = "NOAA GFS BDP S3 0.25°"
-                return rows
-            except Exception as exc:
-                logger.exception("GTMS NOAA GFS fallback failed")
-                source_errors.append(f"NOAA GFS: {type(exc).__name__}: {exc}")
-                raise RuntimeError("모든 공개 기상자료 수신에 실패했습니다. " + " | ".join(source_errors)) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"기상자료 처리 실패: {exc}",
-        ) from exc
+        # Backup source: ECMWF AIFS / IFS Open Data, used only when NOAA GFS is unavailable.
+        try:
+            model = "aifs" if model_alias in ("ecmwf_aifs025_single", "aifs", "aifs-single") else "ifs"
+            cycle, pressure_path, surface_path = _get_bundle(model)
+            pressure_fields = _read_fields(pressure_path, points)
+            surface_fields = _read_fields(surface_path, points) if surface_path else {}
+            rows = _build_rows(
+                model, cycle, points, pressure_fields, surface_fields, request.hours
+            )
+            if not any(
+                any(value is not None for value in row["hourly"].get("wind_speed_250hPa", []))
+                for row in rows
+            ):
+                raise RuntimeError("ECMWF 자료에서 항공 고도 바람 변수를 찾지 못했습니다.")
+            for row in rows:
+                row["source"] = "ECMWF " + model.upper()
+            return rows
+        except Exception as exc:
+            logger.exception("Backup ECMWF forecast failed")
+            source_errors.append(f"ECMWF: {type(exc).__name__}: {exc}")
+            raise HTTPException(
+                status_code=502,
+                detail="공개 기상자료를 모두 수신하지 못했습니다. " + " | ".join(source_errors),
+            ) from exc
