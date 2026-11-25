@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import logging
 import threading
 import requests
 import time
@@ -22,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 APP_VERSION = "1.0.0"
+logger = logging.getLogger("uvicorn.error")
 CACHE_DIR = Path(os.getenv("GTMS_GRIB_CACHE", "/tmp/gtms-ecmwf"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 FORECAST_STEPS = list(range(0, 49, 6))
@@ -426,6 +428,7 @@ def noaa_smoke(lat: float = 37.5, lon: float = 127.0):
             "sample_wind_speed_250hPa_ms": hourly["wind_speed_250hPa"],
         }
     except Exception as exc:
+        logger.exception("GTMS NOAA GFS self-test failed")
         raise HTTPException(status_code=502, detail=f"NOAA GFS self-test failed: {type(exc).__name__}: {exc}") from exc
 
 
@@ -508,6 +511,7 @@ def forecast(request: ForecastRequest):
                     row["source"] = "NOAA GFS 0.25°"
                 return rows
             except Exception as exc:
+                logger.exception("GTMS NOAA GFS fallback failed")
                 source_errors.append(f"NOAA GFS: {type(exc).__name__}: {exc}")
                 raise RuntimeError("모든 공개 기상자료 수신에 실패했습니다. " + " | ".join(source_errors)) from exc
     except Exception as exc:
