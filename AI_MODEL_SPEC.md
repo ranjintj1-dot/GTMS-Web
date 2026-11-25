@@ -56,7 +56,7 @@ If one model is unavailable, the other model's index is used and the status pane
 - The user selects a forecast lead time and a pressure level (300, 250 or 200 hPa) for the map's wind field.
 - Composite, CAT, convective and wind-speed fields are rendered as separate rectangular grid-cell layers. Each cell uses the value at its forecast grid point; dark cell borders make the analysis zones distinct, and the composite cell may display its 0–100 index.
 - The display grid is sized to roughly 80 screen pixels per cell and is capped at 84 points per model request. The cells are a display aggregation of the forecast samples, not new high-resolution model data.
-- Animated white particles are advected using the selected pressure-level U/V wind components; these are visual flow tracers, not aircraft trajectories.
+- No animated wind particles, streamlines or wind-vector motion effects are rendered. The optional wind-speed layer is static.
 - No isobars or geopotential-height contour lines are drawn.
 - 2D Leaflet and 3D Cesium views both use rectangular grid zones. The 2D view uses canvas cells with visible borders; the 3D view uses translucent rectangular geographic cells and wind-vector lines.
 - Panning or zooming schedules a new grid query. The automatic polling interval is 15 minutes, but the underlying models update less frequently.
