@@ -63,7 +63,7 @@ jobs:
           set -euo pipefail
           BASE="https://gtms-weather-api.onrender.com"
           for product in sigmets pireps; do
-            CODE="$(curl -sS -D "/tmp/$product.headers" -o "/tmp/$product.json" -w '%{http_code}' --max-time 60 "$BASE/api/$product" || true)"
+            CODE="$(curl -sS -H 'Origin: https://gtms-static.onrender.com' -D "/tmp/$product.headers" -o "/tmp/$product.json" -w '%{http_code}' --max-time 60 "$BASE/api/$product" || true)"
             cat "/tmp/$product.headers"
             if [ "$CODE" != "200" ]; then
               cat "/tmp/$product.json"
