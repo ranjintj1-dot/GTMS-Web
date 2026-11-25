@@ -508,8 +508,9 @@ async function fetchEcmwfGrid(model,points,horizon){
   body:JSON.stringify({
    model:modelName,
    points:points.map(p=>({lat:Number(p.lat),lon:Number(p.lon)})),
-   hours:72
-  })
+   hours:48
+  }),
+  signal:AbortSignal.timeout(60000)
  });
  const raw=await response.text();
  let data;
