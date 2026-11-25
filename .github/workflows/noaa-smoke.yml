@@ -7,6 +7,7 @@ on:
       - "api/**"
       - "noaa-proxy-config.js"
       - "index.html"
+      - ".github/workflows/noaa-smoke.yml"
   workflow_dispatch:
 
 permissions:
