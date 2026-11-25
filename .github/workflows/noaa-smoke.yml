@@ -22,16 +22,16 @@ jobs:
           set -euo pipefail
           BASE="https://gtms-weather-api.onrender.com"
           ready=0
-          for attempt in $(seq 1 40); do
+          for attempt in $(seq 1 60); do
             code="$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 20 "$BASE/health" || true)"
-            if [ "$code" = "200" ]; then
+            if [ "$code" = "200" ] && grep -q '"version":"1.0.1"' /tmp/health.json; then
               ready=1
               break
             fi
             sleep 10
           done
           if [ "$ready" != "1" ]; then
-            echo "GTMS weather gateway did not become healthy"
+            echo "GTMS weather gateway did not deploy the expected version 1.0.1"
             cat /tmp/health.json 2>/dev/null || true
             exit 1
           fi
