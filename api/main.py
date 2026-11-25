@@ -1,0 +1,274 @@
+from __future__ import annotations
+
+import math
+import os
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+from eccodes import (
+    codes_get,
+    codes_grib_find_nearest,
+    codes_grib_new_from_file,
+    codes_release,
+)
+from ecmwf.opendata import Client
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+APP_VERSION = "1.0.0"
+CACHE_DIR = Path(os.getenv("GTMS_GRIB_CACHE", "/tmp/gtms-ecmwf"))
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+FORECAST_STEPS = list(range(0, 49, 6))
+PRESSURE_LEVELS = [200, 250, 300, 500]
+LOCK = threading.RLock()
+
+app = FastAPI(
+    title="GTMS ECMWF Open Data Gateway",
+    version=APP_VERSION,
+    description="Direct ECMWF AIFS/IFS Open Data access for GTMS. No Open-Meteo API dependency.",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://gtms-static.onrender.com",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
+
+
+class Point(BaseModel):
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+
+
+class ForecastRequest(BaseModel):
+    model: str
+    points: list[Point] = Field(min_length=1, max_length=84)
+    hours: int = Field(default=48, ge=6, le=48)
+
+
+def _run_candidates() -> list[datetime]:
+    now = datetime.now(timezone.utc)
+    cycle_hour = (now.hour // 6) * 6
+    anchor = now.replace(hour=cycle_hour, minute=0, second=0, microsecond=0)
+    return [anchor - timedelta(hours=6 * n) for n in range(0, 5)]
+
+
+def _cache_file(model: str, cycle: datetime, part: str) -> Path:
+    stamp = cycle.strftime("%Y%m%d_%H")
+    return CACHE_DIR / f"{model}_{stamp}_{part}.grib2"
+
+
+def _retrieve(model: str, cycle: datetime, part: str) -> Path:
+    path = _cache_file(model, cycle, part)
+    if path.exists() and path.stat().st_size > 1000:
+        # ECMWF forecasts are issued every six hours; keep a run for up to 8 hours.
+        if time.time() - path.stat().st_mtime < 8 * 3600:
+            return path
+        path.unlink(missing_ok=True)
+
+    source_model = "aifs-single" if model == "aifs" else "ifs"
+    client = Client(source="aws", model=source_model, resol="0p25")
+    request: dict[str, Any] = {
+        "date": cycle.strftime("%Y%m%d"),
+        "time": cycle.hour,
+        "stream": "oper",
+        "type": "fc",
+        "step": FORECAST_STEPS,
+    }
+    if part == "pressure":
+        request.update({
+            "levtype": "pl",
+            "levelist": PRESSURE_LEVELS,
+            "param": ["u", "v", "t", "z", "w"],
+        })
+    else:
+        request.update({
+            "levtype": "sfc",
+            "param": ["cape", "tp", "tcc"],
+        })
+
+    temp_path = path.with_suffix(".part")
+    temp_path.unlink(missing_ok=True)
+    try:
+        client.retrieve(request=request, target=str(temp_path))
+        if not temp_path.exists() or temp_path.stat().st_size < 1000:
+            raise RuntimeError("ECMWF에서 비어 있거나 불완전한 GRIB 파일을 받았습니다.")
+        temp_path.replace(path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+    return path
+
+
+def _get_bundle(model: str) -> tuple[datetime, Path, Path | None]:
+    errors: list[str] = []
+    for cycle in _run_candidates():
+        try:
+            pressure = _retrieve(model, cycle, "pressure")
+            surface: Path | None = None
+            if model == "ifs":
+                try:
+                    surface = _retrieve(model, cycle, "surface")
+                except Exception:
+                    # Pressure-level CAT fields remain usable if surface convective fields
+                    # are temporarily absent from a newly disseminated cycle.
+                    surface = None
+            return cycle, pressure, surface
+        except Exception as exc:
+            errors.append(f"{cycle:%Y-%m-%d %H}Z: {exc}")
+    raise RuntimeError("최근 ECMWF 예보 실행을 찾지 못했습니다. " + " | ".join(errors[-3:]))
+
+
+def _read_fields(path: Path, points: list[Point]) -> dict[tuple[str, int, int], list[float | None]]:
+    fields: dict[tuple[str, int, int], list[float | None]] = {}
+    with path.open("rb") as stream:
+        while True:
+            gid = codes_grib_new_from_file(stream)
+            if gid is None:
+                break
+            try:
+                short_name = str(codes_get(gid, "shortName")).lower()
+                level = int(codes_get(gid, "level"))
+                try:
+                    step = int(codes_get(gid, "endStep"))
+                except Exception:
+                    step = int(codes_get(gid, "step"))
+                values: list[float | None] = []
+                for point in points:
+                    nearest = codes_grib_find_nearest(gid, point.lat, point.lon)
+                    value = float(nearest[0]["value"])
+                    values.append(value if math.isfinite(value) else None)
+                fields[(short_name, level, step)] = values
+            finally:
+                codes_release(gid)
+    return fields
+
+
+def _field(fields: dict, name: str, level: int, step: int, index: int):
+    values = fields.get((name, level, step))
+    return values[index] if values and index < len(values) else None
+
+
+def _build_rows(
+    model: str,
+    cycle: datetime,
+    points: list[Point],
+    pressure_fields: dict,
+    surface_fields: dict,
+    hours: int,
+) -> list[dict]:
+    steps = [step for step in FORECAST_STEPS if step <= hours]
+    rows: list[dict] = []
+    for point_index, _ in enumerate(points):
+        hourly: dict[str, list] = {
+            "time": [],
+            "cape": [],
+            "precipitation": [],
+            "cloud_cover": [],
+            "vertical_velocity_500hPa": [],
+        }
+        for level in [300, 250, 200]:
+            for name in ["wind_speed", "wind_direction", "temperature", "geopotential_height"]:
+                hourly[f"{name}_{level}hPa"] = []
+
+        previous_tp: float | None = None
+        previous_step: int | None = None
+        for step in steps:
+            valid = cycle + timedelta(hours=step)
+            hourly["time"].append(valid.strftime("%Y-%m-%dT%H:%M"))
+            wind_by_level: dict[int, tuple[float | None, float | None]] = {}
+            for level in [300, 250, 200]:
+                u = _field(pressure_fields, "u", level, step, point_index)
+                v = _field(pressure_fields, "v", level, step, point_index)
+                t = _field(pressure_fields, "t", level, step, point_index)
+                z = _field(pressure_fields, "z", level, step, point_index)
+                if u is not None and v is not None:
+                    speed = math.hypot(u, v)
+                    direction = (math.degrees(math.atan2(-u, -v)) + 360.0) % 360.0
+                    wind_by_level[level] = (speed, direction)
+                else:
+                    wind_by_level[level] = (None, None)
+                hourly[f"wind_speed_{level}hPa"].append(
+                    round(wind_by_level[level][0], 3) if wind_by_level[level][0] is not None else None
+                )
+                hourly[f"wind_direction_{level}hPa"].append(
+                    round(wind_by_level[level][1], 2) if wind_by_level[level][1] is not None else None
+                )
+                hourly[f"temperature_{level}hPa"].append(
+                    round(t - 273.15, 3) if t is not None else None
+                )
+                hourly[f"geopotential_height_{level}hPa"].append(
+                    round(z / 9.80665, 2) if z is not None else None
+                )
+
+            omega = _field(pressure_fields, "w", 500, step, point_index)
+            cape = _field(surface_fields, "cape", 0, step, point_index)
+            tp = _field(surface_fields, "tp", 0, step, point_index)
+            cloud = _field(surface_fields, "tcc", 0, step, point_index)
+
+            hourly["vertical_velocity_500hPa"].append(round(omega, 6) if omega is not None else None)
+            hourly["cape"].append(round(cape, 2) if cape is not None else None)
+            hourly["cloud_cover"].append(round(cloud, 2) if cloud is not None else None)
+
+            precipitation = None
+            if tp is not None:
+                if previous_tp is None or previous_step is None or step <= previous_step:
+                    precipitation = 0.0 if step == 0 else None
+                else:
+                    elapsed = step - previous_step
+                    precipitation = max(0.0, (tp - previous_tp) * 1000.0 / elapsed)
+                previous_tp, previous_step = tp, step
+            hourly["precipitation"].append(
+                round(precipitation, 3) if precipitation is not None else None
+            )
+
+        rows.append({"hourly": hourly})
+    return rows
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "service": "GTMS ECMWF Open Data Gateway",
+        "version": APP_VERSION,
+        "source": "ECMWF Open Data AWS mirror",
+        "open_meteo_dependency": False,
+    }
+
+
+@app.post("/api/forecast")
+def forecast(request: ForecastRequest):
+    model_alias = request.model.strip().lower()
+    if model_alias in ("ecmwf_aifs025_single", "aifs", "aifs-single"):
+        model = "aifs"
+    elif model_alias in ("ecmwf_ifs025", "ifs"):
+        model = "ifs"
+    else:
+        raise HTTPException(status_code=400, detail="지원하지 않는 모델입니다. aifs 또는 ifs를 사용하세요.")
+
+    points = request.points
+    try:
+        # Limit concurrent GRIB downloads/decoding on the small gateway instance.
+        with LOCK:
+            cycle, pressure_path, surface_path = _get_bundle(model)
+            pressure_fields = _read_fields(pressure_path, points)
+            surface_fields = _read_fields(surface_path, points) if surface_path else {}
+            rows = _build_rows(
+                model, cycle, points, pressure_fields, surface_fields, request.hours
+            )
+        return rows
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"ECMWF {model.upper()} 자료 처리 실패: {exc}",
+        ) from exc
