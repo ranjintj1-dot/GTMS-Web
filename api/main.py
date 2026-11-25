@@ -22,7 +22,7 @@ from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 logger = logging.getLogger("uvicorn.error")
 CACHE_DIR = Path(os.getenv("GTMS_GRIB_CACHE", "/tmp/gtms-ecmwf"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -479,7 +479,7 @@ def noaa_smoke(lat: float = 37.5, lon: float = 127.0):
         }
         return {
             "status": "ok" if any(counts.values()) else "no_data",
-            "source": "NOAA NOMADS GFS 0.25 degree",
+            "source": "NOAA GFS BDP S3 0.25 degree",
             "cycle_utc": cycle.strftime("%Y-%m-%dT%H:%MZ"),
             "cache_file_bytes": path.stat().st_size,
             "forecast_times_utc": hourly["time"],
@@ -507,8 +507,8 @@ def health():
         "status": "ok",
         "service": "GTMS ECMWF Open Data Gateway",
         "version": APP_VERSION,
-        "source": "ECMWF Open Data + NOAA NOMADS GFS 0.25",
-        "fallback_source": "NOAA NOMADS GFS",
+        "source": "ECMWF Open Data + NOAA GFS BDP public S3",
+        "fallback_source": "NOAA GFS BDP S3 0.25 degree",
         "noaa_gfs_source": "NOAA GFS BDP public S3 + .idx byte-range retrieval",
         "open_meteo_dependency": False,
         "license": "CC-BY-4.0",
@@ -567,7 +567,7 @@ def forecast(request: ForecastRequest):
                         "GFS GRIB에서 U/V 바람 자료를 찾지 못했습니다. 요청 변수·고도 조합을 확인해야 합니다."
                     )
                 for row in rows:
-                    row["source"] = "NOAA GFS 0.25°"
+                    row["source"] = "NOAA GFS BDP S3 0.25°"
                 return rows
             except Exception as exc:
                 logger.exception("GTMS NOAA GFS fallback failed")
