@@ -78,11 +78,9 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
   <label><input type="checkbox" id="showRoute" checked> 비행 항적</label>
   <div class="divider" style="border-top:1px solid var(--line);margin:10px 0"></div>
   <h2>AI TURBULENCE FORECAST LAYERS</h2>
-  <label>AI 기상모델</label>
+  <label>예보자료 모델</label>
   <select id="aiModel">
-   <option value="hybrid" selected>ECMWF AIFS AI + IFS 결합</option>
-   <option value="aifs">ECMWF AIFS AI</option>
-   <option value="ifs">ECMWF IFS 물리모델</option>
+   <option value="hybrid" selected>NOAA GFS 0.25° 기본 · ECMWF 자동 대체</option>
   </select>
   <label>예보 시각</label>
   <select id="aiForecastHour">
@@ -100,8 +98,8 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
    <button id="aiRefreshBtn" class="primary">AI 위험기상 분석</button>
    <button id="aiClearBtn">AI 레이어 지우기</button>
   </div>
-  <div id="aiSummary" class="hint" style="margin-top:8px">ECMWF AIFS AI + IFS 모델 연결 대기 중</div>
-  <div class="hint">컬러 레이어: AI 난기류 위험지수. 바람 입자·흐름 애니메이션과 등압선·지위고도 등고선은 표시하지 않습니다.</div><div class="hint">기상자료 출처: ECMWF Open Data (IFS / AIFS), 0.25° GRIB2 · AWS 공개 미러 · CC BY 4.0</div><div class="hint">위험지수는 EDR 실측값이나 승인된 난기류 예보가 아닌 실험적 선별값입니다.</div>
+  <div id="aiSummary" class="hint" style="margin-top:8px">NOAA GFS 0.25° 예보자료 연결 대기 중 · ECMWF 대체자료 자동 전환</div>
+  <div class="hint">컬러 레이어: AI 난기류 위험지수. 바람 입자·흐름 애니메이션과 등압선·지위고도 등고선은 표시하지 않습니다.</div><div class="hint">기상자료 출처: NOAA GFS 0.25° (기본) · ECMWF AIFS / IFS (장애 시 대체) · GRIB2</div><div class="hint">위험지수는 EDR 실측값이나 승인된 난기류 예보가 아닌 실험적 선별값입니다.</div>
   <div class="hint">NOAA SIGMET / PIREP은 Cloudflare Worker 중계로 수신합니다. Worker 주소는 noaa-proxy-config.js에 설정합니다.</div>
  </section>
  <section class="panel">
@@ -510,7 +508,7 @@ async function fetchEcmwfGrid(model,points,horizon){
   body:JSON.stringify({
    model:modelName,
    points:points.map(p=>({lat:Number(p.lat),lon:Number(p.lon)})),
-   hours:48
+   hours:Math.max(6,Math.min(48,Number(horizon)||48))
   }),
   signal:AbortSignal.timeout(60000)
  });
@@ -570,14 +568,13 @@ async function refreshAiGrid(force=false){
   const pressure=Number($('windPressure').value)||250;
   aiCacheStats={requests:0,fetchedPoints:0,reusedPoints:0};
   aiDataSources=new Set();
-  let aifsRows=null,ifsRows=null,aifsError=null,ifsError=null;
-  if(chosen==='aifs'||chosen==='hybrid'){
-   try{aifsRows=await fetchEcmwfGridCached('ecmwf_aifs025_single',points,horizon)}catch(e){aifsError=e}
-  }
-  if(chosen==='ifs'||chosen==='hybrid'){
-   try{ifsRows=await fetchEcmwfGridCached('ecmwf_ifs025',points,horizon)}catch(e){ifsError=e}
-  }
-  if(!aifsRows&&!ifsRows)throw new Error('ECMWF 모델 자료 수신 실패. AIFS: '+(aifsError?.message||'조회 안 함')+' / IFS: '+(ifsError?.message||'조회 안 함'));
+  let aifsRows=null,ifsRows=null,aifsError=null;
+  // NOAA GFS is the primary source; the gateway automatically uses ECMWF
+  // AIFS only if NOAA is unavailable. Do not fetch the same NOAA fields twice.
+  try{
+   aifsRows=await fetchEcmwfGridCached('ecmwf_aifs025_single',points,horizon);
+  }catch(e){aifsError=e}
+  if(!aifsRows)throw new Error('NOAA GFS 및 ECMWF 대체 기상자료 수신 실패: '+(aifsError?.message||'원인 미상'));
 
   aiGridResults=points.map((point,index)=>{
    const a=aifsRows?evaluateModelPoint(aifsRows[index],horizon,targetLead,pressure):null;
@@ -614,10 +611,10 @@ async function refreshAiGrid(force=false){
   const valid=aiGridResults.filter(p=>p.mapCatIndex!=null||p.mapConvectiveIndex!=null||p.flowSpeed!=null);
   const maxCat=Math.max(0,...valid.map(p=>p.mapCatIndex??0));
   const maxConv=Math.max(0,...valid.map(p=>p.mapConvectiveIndex??0));
-  const modelLabel=chosen==='hybrid'?(aifsRows&&ifsRows?'AIFS AI + IFS':'단일 모델 대체'):chosen==='aifs'?'ECMWF AIFS AI':'ECMWF IFS';
+  const modelLabel=Array.from(aiDataSources).join(' + ')||'GTMS 기상자료 서버';
   const validTime=aiGridResults.find(p=>p.flowTime)?.flowTime||'';
   $('aiSummary').innerHTML=
-   '<span style="color:#86efac">● Windy형 AI 기상장 표출 완료</span><br>'+
+   '<span style="color:#86efac">● 기상 위험도 레이어 표출 완료</span><br>'+
    '모델: '+esc(modelLabel)+' · 격자: '+valid.length+'/'+points.length+'<br>'+
    '예보시각: '+(targetLead===0?'가장 가까운 예보':'+'+targetLead+'시간')+
    ' · 바람장: '+pressure+' hPa<br>'+
@@ -629,8 +626,8 @@ async function refreshAiGrid(force=false){
    ((aifsError||ifsError)?'<br><span style="color:#fcd34d">일부 모델 조회 실패, 수신 가능한 모델 자료로 대체: '+esc((aifsError||ifsError).message)+'</span>':'');
   $('lastUpdate').textContent='AI 예보 유효: '+(validTime||'--')+' UTC';
  }catch(error){
-  $('aiSummary').innerHTML='<span style="color:#fca5a5">● GTMS 공개 기상자료 수신 실패: '+esc(error.message)+'</span><br>'+
-   'ECMWF와 NOAA GFS 자료원 모두 응답하지 않았습니다.';
+  $('aiSummary').innerHTML='<span style="color:#fca5a5">● GTMS 예보자료 수신 실패: '+esc(error.message)+'</span><br>'+
+   '자료 요청 영역, 연결 상태 및 API 응답을 확인해야 합니다.';
  }finally{
   aiBusy=false;
   if(button)button.disabled=false;
@@ -924,7 +921,7 @@ async function assessRoute(){
  const unique=samples.filter((p,i)=>i%Math.max(1,Math.ceil(samples.length/10))===0);
  if(unique[unique.length-1]!==samples[samples.length-1])unique.push(samples[samples.length-1]);
  const hours=Number($('horizon').value)||48;
- $('routeRows').innerHTML='<tr><td colspan="5">GTMS 자체 ECMWF 서버에서 항로 예보자료를 조회하고 있습니다…</td></tr>';
+ $('routeRows').innerHTML='<tr><td colspan="5">NOAA GFS 기본 예보자료로 항로 기상자료를 조회하고 있습니다…</td></tr>';
  let rows=[];
  try{
   aiCacheStats={requests:0,fetchedPoints:0,reusedPoints:0};
@@ -955,7 +952,7 @@ async function assessRoute(){
  setFeed(
   '<span style="color:'+(failures?'#fcd34d':'#86efac')+'">● '+esc(Array.from(aiDataSources).join(' + ')||'GTMS 공개 기상자료')+': 항로 분석 '+(failures?'부분':'')+'완료</span><br>'+
   '조회 지점 '+rows.length+'개 · 유효 '+valid+'개 · 자료 누락 '+failures+'개 · '+hours+'시간 범위'+
-  '<br><span style="color:#9bb5c7">AIFS / IFS 원자료 · GTMS 자체 서버 처리</span>'
+  '<br><span style="color:#9bb5c7">NOAA GFS 0.25° 기본 · ECMWF 자동 대체</span>'
  );
 }
 function renderAssessment(){

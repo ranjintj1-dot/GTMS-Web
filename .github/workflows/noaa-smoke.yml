@@ -23,14 +23,14 @@ jobs:
           ready=0
           for attempt in $(seq 1 60); do
             code="$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 20 "$BASE/health" || true)"
-            if [ "$code" = "200" ] && grep -q '"version":"1.0.4"' /tmp/health.json && grep -q '"release":"gtms-noaa-primary-20261125-r1"' /tmp/health.json; then
+            if [ "$code" = "200" ] && grep -q '"version":"1.0.5"' /tmp/health.json && grep -q '"release":"gtms-noaa-primary-20261125-r2"' /tmp/health.json; then
               ready=1
               break
             fi
             sleep 10
           done
           if [ "$ready" != "1" ]; then
-            echo "GTMS weather gateway did not deploy the expected version 1.0.4"
+            echo "GTMS weather gateway did not deploy the expected version 1.0.5"
             cat /tmp/health.json 2>/dev/null || true
             exit 1
           fi
@@ -67,8 +67,20 @@ jobs:
         run: |
           set -euo pipefail
           URL="https://gtms-weather-api.onrender.com/api/forecast"
-          BODY='{"model":"aifs","points":[{"lat":37.5,"lon":127.0},{"lat":35.2,"lon":129.1}],"hours":12}'
-          HTTP_CODE="$(curl -sS -X POST -H 'Content-Type: application/json' -d "$BODY" -o /tmp/forecast.json -w '%{http_code}' --max-time 480 "$URL" || true)"
+          python - <<'PY'
+          import json
+          lats = [42, 34, 26, 18, 10, 2, -6]
+          longitudes = [10 + i * (260 / 11) for i in range(12)]
+          points = []
+          for lat in lats:
+              for display_lon in longitudes:
+                  lon = (display_lon + 180) % 360 - 180
+                  points.append({"lat": lat, "lon": round(lon, 3)})
+          assert len(points) == 84
+          with open("/tmp/forecast-request.json", "w") as f:
+              json.dump({"model":"aifs", "points":points, "hours":48}, f)
+          PY
+          HTTP_CODE="$(curl -sS -X POST -H 'Content-Type: application/json' --data-binary @/tmp/forecast-request.json -o /tmp/forecast.json -w '%{http_code}' --max-time 600 "$URL" || true)"
           cat /tmp/forecast.json
           if [ "$HTTP_CODE" != "200" ]; then
             echo "GTMS browser forecast endpoint returned HTTP $HTTP_CODE"
@@ -78,13 +90,13 @@ jobs:
           import json
           from pathlib import Path
           rows = json.loads(Path("/tmp/forecast.json").read_text())
-          assert isinstance(rows, list) and len(rows) == 2, rows
+          assert isinstance(rows, list) and len(rows) == 84, rows
           for row in rows:
               hourly = row.get("hourly", {})
               speeds = hourly.get("wind_speed_250hPa", [])
               assert any(value is not None for value in speeds), row
               assert any(value is not None for value in hourly.get("wind_speed_300hPa", [])), row
               assert row.get("source") == "NOAA GFS BDP S3 0.25°", row
-          print("PASS: GTMS /api/forecast returned two usable upper-air grid points.")
+          print("PASS: GTMS /api/forecast returned 84 usable upper-air grid points across a 260-degree viewport.")
           print("Sources:", sorted({row.get("source") for row in rows}))
           PY

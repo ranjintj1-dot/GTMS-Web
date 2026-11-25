@@ -22,8 +22,8 @@ from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-APP_VERSION = "1.0.4"
-APP_RELEASE_ID = "gtms-noaa-primary-20261125-r1"
+APP_VERSION = "1.0.5"
+APP_RELEASE_ID = "gtms-noaa-primary-20261125-r2"
 logger = logging.getLogger("uvicorn.error")
 CACHE_DIR = Path(os.getenv("GTMS_GRIB_CACHE", "/tmp/gtms-ecmwf"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -325,10 +325,8 @@ def _download_gfs_cycle(cycle: datetime, points: list[Point], hours: int) -> Pat
     right = min(359.75, math.ceil(max(lons) + 1.0))
     bottom = max(-89.75, math.floor(min(p.lat for p in points) - 1.0))
     top = min(89.75, math.ceil(max(p.lat for p in points) + 1.0))
-    if right - left > 180 or top - bottom > 90:
-        raise RuntimeError(
-            "NOAA GFS 영역이 너무 넓습니다. 지도를 분석 지역으로 확대하거나 항로 분석 구간을 나눠 주세요."
-        )
+    # NOAA GRIB messages are global fields. Sample the requested points from the
+    # global grid with ecCodes; do not reject wide viewports or dateline crossings.
 
     elapsed = max(0, (datetime.now(timezone.utc) - cycle).total_seconds() / 3600.0)
     first_step = min(72, max(0, int(math.ceil(elapsed / 6.0) * 6)))
