@@ -16,6 +16,7 @@ from eccodes import (
 )
 from ecmwf.opendata import Client
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -252,6 +253,11 @@ def root():
     return health()
 
 
+@app.head("/")
+def root_head():
+    return Response(status_code=200)
+
+
 @app.get("/health")
 def health():
     return {
@@ -260,6 +266,9 @@ def health():
         "version": APP_VERSION,
         "source": "ECMWF Open Data AWS mirror",
         "open_meteo_dependency": False,
+        "license": "CC-BY-4.0",
+        "forecast_step_hours": 6,
+        "forecast_coverage_hours": 72,
     }
 
 
