@@ -62,7 +62,7 @@ If one model is unavailable, the other model's index is used and the status pane
 - Panning or zooming schedules a new grid query. The automatic polling interval is 15 minutes, but the underlying models update less frequently.
 - This is not a live turbulence sensor feed. AIFS Single provides 6-hourly forecast time steps and is updated every six hours. Open-data IFS 0.25° has 3-hourly and 6-hourly output and is updated every six hours. A 15-minute screen refresh may therefore display the same model run repeatedly.
 
-The square-cell display does not add physical forecast resolution beyond the source model's approximately 0.25° grid (roughly 25–28 km). Each tile is a readable display zone derived from the nearest sampled forecast point.
+The continuous colour layer is interpolated from forecast grid-point values for visual continuity. It does not add physical forecast resolution beyond the source model's approximately 0.25° grid (roughly 25–28 km).
 
 ## 4. Experimental risk categories
 
