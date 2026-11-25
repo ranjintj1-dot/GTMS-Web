@@ -14,6 +14,7 @@ from eccodes import (
     codes_get,
     codes_grib_find_nearest_multiple,
     codes_grib_new_from_file,
+    codes_get_values,
     codes_release,
 )
 from ecmwf.opendata import Client
@@ -22,8 +23,8 @@ from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-APP_VERSION = "1.0.5"
-APP_RELEASE_ID = "gtms-noaa-primary-20261125-r2"
+APP_VERSION = "1.0.6"
+APP_RELEASE_ID = "gtms-noaa-primary-20261125-r3"
 logger = logging.getLogger("uvicorn.error")
 CACHE_DIR = Path(os.getenv("GTMS_GRIB_CACHE", "/tmp/gtms-ecmwf"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -153,8 +154,80 @@ def _get_bundle(model: str) -> tuple[datetime, Path, Path | None]:
     raise RuntimeError("최근 ECMWF 예보 실행을 찾지 못했습니다. " + " | ".join(errors[-3:]))
 
 
+def _sample_regular_global_ll(
+    gid: Any,
+    points: list[Point],
+    missing_value: float,
+) -> list[float | None] | None:
+    """
+    Fast point sampling for global regular lat/lon GRIB grids such as NOAA GFS 0.25°.
+    ecCodes' nearest-search helper can be expensive when called for dozens of points
+    across the whole globe. For regular_ll grids, compute the nearest flattened array
+    indices directly. Return None for any unsupported scan layout so the safe ecCodes
+    nearest-search path can be used instead.
+    """
+    try:
+        if str(codes_get(gid, "gridType")) != "regular_ll":
+            return None
+
+        ni = int(codes_get(gid, "Ni"))
+        nj = int(codes_get(gid, "Nj"))
+        lat0 = float(codes_get(gid, "latitudeOfFirstGridPointInDegrees"))
+        lon0 = float(codes_get(gid, "longitudeOfFirstGridPointInDegrees"))
+        di = float(codes_get(gid, "iDirectionIncrementInDegrees"))
+        dj = float(codes_get(gid, "jDirectionIncrementInDegrees"))
+        i_negative = bool(int(codes_get(gid, "iScansNegatively")))
+        j_positive = bool(int(codes_get(gid, "jScansPositively")))
+        j_consecutive = bool(int(codes_get(gid, "jPointsAreConsecutive")))
+        alternate_rows = bool(int(codes_get(gid, "alternativeRowScanning")))
+
+        # This shortcut is intentionally restricted to a complete global grid.
+        if ni <= 0 or nj <= 0 or di <= 0 or dj <= 0:
+            return None
+        if abs(ni * di - 360.0) > max(0.01, di * 0.1):
+            return None
+        if j_consecutive and alternate_rows:
+            return None
+
+        data = codes_get_values(gid)
+        if len(data) != ni * nj:
+            return None
+
+        first_lon = lon0 % 360.0
+        result: list[float | None] = []
+        for point in points:
+            target_lon = point.lon % 360.0
+            if i_negative:
+                i = int(round(((first_lon - target_lon) % 360.0) / di)) % ni
+            else:
+                i = int(round(((target_lon - first_lon) % 360.0) / di)) % ni
+
+            if j_positive:
+                j = int(round((point.lat - lat0) / dj))
+            else:
+                j = int(round((lat0 - point.lat) / dj))
+            if j < 0 or j >= nj:
+                return None
+
+            if alternate_rows and (j % 2 == 1):
+                i = ni - 1 - i
+
+            flat_index = i * nj + j if j_consecutive else j * ni + i
+            value = float(data[flat_index])
+            is_missing = (
+                not math.isfinite(value)
+                or (math.isfinite(missing_value) and value == missing_value)
+            )
+            result.append(None if is_missing else value)
+        return result
+    except Exception:
+        return None
+
+
 def _read_fields(path: Path, points: list[Point]) -> dict[tuple[str, int, int], list[float | None]]:
     fields: dict[tuple[str, int, int], list[float | None]] = {}
+    message_count = 0
+    started = time.monotonic()
     with path.open("rb") as stream:
         while True:
             gid = codes_grib_new_from_file(stream)
@@ -171,23 +244,33 @@ def _read_fields(path: Path, points: list[Point]) -> dict[tuple[str, int, int], 
                     missing_value = float(codes_get(gid, "missingValue"))
                 except Exception:
                     missing_value = float("nan")
-                nearest = codes_grib_find_nearest_multiple(
-                    gid,
-                    False,
-                    [point.lat for point in points],
-                    [point.lon for point in points],
-                )
-                values: list[float | None] = []
-                for item in nearest:
-                    value = float(item.value)
-                    is_missing = (
-                        not math.isfinite(value)
-                        or (math.isfinite(missing_value) and value == missing_value)
+
+                values = _sample_regular_global_ll(gid, points, missing_value)
+                if values is None:
+                    nearest = codes_grib_find_nearest_multiple(
+                        gid,
+                        False,
+                        [point.lat for point in points],
+                        [point.lon for point in points],
                     )
-                    values.append(None if is_missing else value)
+                    values = []
+                    for item in nearest:
+                        value = float(item.value)
+                        is_missing = (
+                            not math.isfinite(value)
+                            or (math.isfinite(missing_value) and value == missing_value)
+                        )
+                        values.append(None if is_missing else value)
+
                 fields[(short_name, level, step)] = values
+                message_count += 1
             finally:
                 codes_release(gid)
+
+    logger.info(
+        "GTMS GRIB extraction complete: messages=%s points=%s elapsed_seconds=%.2f",
+        message_count, len(points), time.monotonic() - started,
+    )
     return fields
 
 
