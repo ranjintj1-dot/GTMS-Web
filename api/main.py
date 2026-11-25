@@ -22,14 +22,14 @@ from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 logger = logging.getLogger("uvicorn.error")
 CACHE_DIR = Path(os.getenv("GTMS_GRIB_CACHE", "/tmp/gtms-ecmwf"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 FORECAST_STEPS = list(range(0, 49, 6))
 GFS_FORECAST_STEPS = list(range(0, 73, 6))
 PRESSURE_LEVELS = [200, 250, 300, 500]
-NOAA_GFS_FILTER = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
+NOAA_GFS_FILTER = "https://noaa-gfs-bdp-pds.s3.amazonaws.com/"
 LOCK = threading.RLock()
 ROW_CACHE: dict[tuple[str, str, str, str, int], tuple[float, dict]] = {}
 ROW_CACHE_TTL = 6 * 3600
@@ -306,7 +306,13 @@ def _download_gfs_cycle(cycle: datetime, points: list[Point], hours: int) -> Pat
             return cache_path
         cache_path.unlink(missing_ok=True)
 
-    # NOMADS uses 0..360 degree east longitude for the 0.25-degree global grid.
+    # NOAA's anonymous public S3 bucket serves the operational GFS GRIB2 files
+    # together with byte-offset indexes. Pull only the required GRIB messages.
+    file_name = f"gfs.t{cycle:%H}z.pgrb2.0p25"
+    base_url = (
+        f"https://noaa-gfs-bdp-pds.s3.amazonaws.com/"
+        f"gfs.{cycle:%Y%m%d}/{cycle:%H}/atmos/{file_name}"
+    )
     lons = [point.lon % 360.0 for point in points]
     left = max(0.0, math.floor(min(lons) - 1.0))
     right = min(359.75, math.ceil(max(lons) + 1.0))
@@ -317,7 +323,6 @@ def _download_gfs_cycle(cycle: datetime, points: list[Point], hours: int) -> Pat
             "NOAA GFS 영역이 너무 넓습니다. 지도를 분석 지역으로 확대하거나 항로 분석 구간을 나눠 주세요."
         )
 
-    # Use 6-hourly forecast slices. Data are cached as one multi-message GRIB2 file.
     elapsed = max(0, (datetime.now(timezone.utc) - cycle).total_seconds() / 3600.0)
     first_step = min(72, max(0, int(math.ceil(elapsed / 6.0) * 6)))
     final_step = min(72, int(math.ceil((elapsed + hours) / 6.0) * 6))
@@ -325,62 +330,118 @@ def _download_gfs_cycle(cycle: datetime, points: list[Point], hours: int) -> Pat
     if not steps:
         steps = [min(72, first_step)]
 
-    temp_path = cache_path.with_suffix(".part")
-    errors: list[str] = []
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "GTMS-Weather-Gateway/1.0 (NOAA NOMADS public data client)",
-        "Accept": "*/*",
+        "User-Agent": "GTMS-Weather-Gateway/1.0 (NOAA GFS public AWS data client)",
+        "Accept-Encoding": "identity",
     })
+    temp_path = cache_path.with_suffix(".part")
+    downloaded_messages = 0
     try:
         with temp_path.open("wb") as output:
             for step in steps:
-                file_name = f"gfs.t{cycle:%H}z.pgrb2.0p25.f{step:03d}"
-                params = {
-                    "file": file_name,
-                    "dir": f"/gfs.{cycle:%Y%m%d}/{cycle:%H}/atmos",
-                    "subregion": "",
-                    "leftlon": f"{left:.2f}",
-                    "rightlon": f"{right:.2f}",
-                    "toplat": f"{top:.2f}",
-                    "bottomlat": f"{bottom:.2f}",
-                    # Keep the first request to the primary pressure-level fields.
-                    # Surface/secondary parameters are fetched separately so one invalid
-                    # combination cannot make the whole upper-air GRIB request fail.
-                    "var_UGRD": "on",
-                    "var_VGRD": "on",
-                    "var_TMP": "on",
-                    "var_HGT": "on",
-                    "var_VVEL": "on",
-                    "lev_200_mb": "on",
-                    "lev_250_mb": "on",
-                    "lev_300_mb": "on",
-                    "lev_500_mb": "on",
-                }
-                try:
+                object_url = f"{base_url}.f{step:03d}"
+                index_response = session.get(object_url + ".idx", timeout=(12, 45))
+                index_response.raise_for_status()
+                index_lines = [
+                    line.strip() for line in index_response.text.splitlines() if line.strip()
+                ]
+                entries: list[dict[str, Any]] = []
+                for line in index_lines:
+                    parts = line.split(":")
+                    if len(parts) < 5:
+                        continue
+                    try:
+                        offset = int(parts[1])
+                    except ValueError:
+                        continue
+                    entries.append({
+                        "offset": offset,
+                        "variable": parts[3].strip().upper(),
+                        "level": parts[4].strip().lower(),
+                        "line": line,
+                    })
+                if not entries:
+                    raise RuntimeError(f"GFS f{step:03d} 색인(.idx)을 해석하지 못했습니다.")
+
+                desired = []
+                for index, entry in enumerate(entries):
+                    variable = entry["variable"]
+                    level = entry["level"]
+                    wanted = (
+                        variable in ("UGRD", "VGRD", "TMP", "HGT")
+                        and any(level.startswith(f"{p} mb") for p in (200, 250, 300))
+                    ) or (variable == "VVEL" and level.startswith("500 mb"))
+                    if not wanted:
+                        continue
+                    next_offset = (
+                        entries[index + 1]["offset"]
+                        if index + 1 < len(entries)
+                        else None
+                    )
+                    desired.append({
+                        "start": entry["offset"],
+                        "end": next_offset - 1 if next_offset is not None else None,
+                        "variable": variable,
+                        "level": level,
+                    })
+
+                if not desired:
+                    raise RuntimeError(
+                        f"GFS f{step:03d} 색인에 상층 U/V/T/HGT 메시지가 없습니다."
+                    )
+
+                # Determine the final message length only when an indexed message
+                # extends to the end of the GRIB object.
+                if any(item["end"] is None for item in desired):
+                    head = session.head(object_url, timeout=(12, 30))
+                    head.raise_for_status()
+                    total_size = int(head.headers.get("Content-Length", "0"))
+                    if total_size <= 0:
+                        raise RuntimeError("GFS GRIB 객체 크기를 확인하지 못했습니다.")
+                    for item in desired:
+                        if item["end"] is None:
+                            item["end"] = total_size - 1
+
+                desired.sort(key=lambda item: item["start"])
+                # Merge nearby messages into fewer S3 byte-range requests.
+                groups: list[dict[str, Any]] = []
+                for item in desired:
+                    if groups and item["start"] - groups[-1]["end"] - 1 <= 256 * 1024:
+                        groups[-1]["end"] = item["end"]
+                    else:
+                        groups.append({"start": item["start"], "end": item["end"]})
+
+                for group in groups:
                     response = session.get(
-                        NOAA_GFS_FILTER,
-                        params=params,
-                        timeout=(12, 45),
+                        object_url,
+                        headers={"Range": f"bytes={group['start']}-{group['end']}"},
+                        timeout=(12, 90),
                     )
                     response.raise_for_status()
-                    content = response.content
-                    if len(content) < 1000 or not content.startswith(b"GRIB"):
-                        preview = content[:180].decode("utf-8", "replace")
+                    if response.status_code != 206:
                         raise RuntimeError(
-                            f"NOMADS f{step:03d} 응답이 GRIB2가 아닙니다: {preview}"
+                            f"GFS S3 부분 다운로드가 HTTP {response.status_code}를 반환했습니다."
+                        )
+                    content = response.content
+                    if len(content) < 100 or not content.startswith(b"GRIB"):
+                        raise RuntimeError(
+                            f"GFS f{step:03d} GRIB 메시지 범위가 올바르지 않습니다."
                         )
                     output.write(content)
-                    output.flush()
-                except Exception as exc:
-                    errors.append(f"f{step:03d}: {type(exc).__name__}: {exc}")
-                    raise RuntimeError(
-                        "NOAA NOMADS GFS 자료 다운로드 실패 (" + "; ".join(errors[-3:]) + ")"
-                    ) from exc
-                time.sleep(0.25)
+                    downloaded_messages += len([
+                        item for item in desired
+                        if group["start"] <= item["start"] <= group["end"]
+                    ])
+                time.sleep(0.15)
+
         if not temp_path.exists() or temp_path.stat().st_size < 1000:
             raise RuntimeError("NOAA GFS GRIB2 자료가 비어 있습니다.")
         temp_path.replace(cache_path)
+        logger.info(
+            "NOAA GFS AWS data cached: cycle=%s bytes=%s indexed_messages=%s steps=%s",
+            cycle.strftime("%Y%m%d%H"), cache_path.stat().st_size, downloaded_messages, steps,
+        )
         return cache_path
     except Exception:
         temp_path.unlink(missing_ok=True)
@@ -448,7 +509,7 @@ def health():
         "version": APP_VERSION,
         "source": "ECMWF Open Data + NOAA NOMADS GFS 0.25",
         "fallback_source": "NOAA NOMADS GFS",
-        "noaa_gfs_filter": NOAA_GFS_FILTER,
+        "noaa_gfs_source": "NOAA GFS BDP public S3 + .idx byte-range retrieval",
         "open_meteo_dependency": False,
         "license": "CC-BY-4.0",
         "forecast_step_hours": 6,
