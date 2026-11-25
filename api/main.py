@@ -22,9 +22,11 @@ from pydantic import BaseModel, Field
 APP_VERSION = "1.0.0"
 CACHE_DIR = Path(os.getenv("GTMS_GRIB_CACHE", "/tmp/gtms-ecmwf"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-FORECAST_STEPS = list(range(0, 49, 6))
+FORECAST_STEPS = list(range(0, 73, 6))
 PRESSURE_LEVELS = [200, 250, 300, 500]
 LOCK = threading.RLock()
+ROW_CACHE: dict[tuple[str, str, str, str, int], tuple[float, dict]] = {}
+ROW_CACHE_TTL = 6 * 3600
 
 app = FastAPI(
     title="GTMS ECMWF Open Data Gateway",
@@ -52,7 +54,7 @@ class Point(BaseModel):
 class ForecastRequest(BaseModel):
     model: str
     points: list[Point] = Field(min_length=1, max_length=84)
-    hours: int = Field(default=48, ge=6, le=48)
+    hours: int = Field(default=72, ge=6, le=72)
 
 
 def _run_candidates() -> list[datetime]:
@@ -142,11 +144,19 @@ def _read_fields(path: Path, points: list[Point]) -> dict[tuple[str, int, int], 
                     step = int(codes_get(gid, "endStep"))
                 except Exception:
                     step = int(codes_get(gid, "step"))
+                try:
+                    missing_value = float(codes_get(gid, "missingValue"))
+                except Exception:
+                    missing_value = float("nan")
                 values: list[float | None] = []
                 for point in points:
                     nearest = codes_grib_find_nearest(gid, point.lat, point.lon)
                     value = float(nearest[0]["value"])
-                    values.append(value if math.isfinite(value) else None)
+                    is_missing = (
+                        not math.isfinite(value)
+                        or (math.isfinite(missing_value) and value == missing_value)
+                    )
+                    values.append(None if is_missing else value)
                 fields[(short_name, level, step)] = values
             finally:
                 codes_release(gid)
@@ -265,15 +275,45 @@ def forecast(request: ForecastRequest):
 
     points = request.points
     try:
-        # Limit concurrent GRIB downloads/decoding on the small gateway instance.
+        # One process-wide lock keeps GRIB downloads and decoding from stampeding.
         with LOCK:
             cycle, pressure_path, surface_path = _get_bundle(model)
-            pressure_fields = _read_fields(pressure_path, points)
-            surface_fields = _read_fields(surface_path, points) if surface_path else {}
-            rows = _build_rows(
-                model, cycle, points, pressure_fields, surface_fields, request.hours
-            )
-        return rows
+            now = time.time()
+            cycle_key = cycle.strftime("%Y%m%d%H")
+            keys = [
+                (model, cycle_key, f"{point.lat:.4f}", f"{point.lon:.4f}", request.hours)
+                for point in points
+            ]
+            rows_by_key: dict[tuple, dict] = {}
+            missing_indices: list[int] = []
+            for index, key in enumerate(keys):
+                cached = ROW_CACHE.get(key)
+                if cached and now - cached[0] < ROW_CACHE_TTL:
+                    rows_by_key[key] = cached[1]
+                else:
+                    if cached:
+                        ROW_CACHE.pop(key, None)
+                    missing_indices.append(index)
+
+            if missing_indices:
+                missing_points = [points[index] for index in missing_indices]
+                pressure_fields = _read_fields(pressure_path, missing_points)
+                surface_fields = _read_fields(surface_path, missing_points) if surface_path else {}
+                fresh_rows = _build_rows(
+                    model, cycle, missing_points, pressure_fields, surface_fields, request.hours
+                )
+                for index, row in zip(missing_indices, fresh_rows):
+                    key = keys[index]
+                    ROW_CACHE[key] = (now, row)
+                    rows_by_key[key] = row
+
+            # Keep the in-memory cache bounded on the small free instance.
+            if len(ROW_CACHE) > 25000:
+                oldest = sorted(ROW_CACHE.items(), key=lambda item: item[1][0])
+                for key, _ in oldest[: max(1, len(ROW_CACHE) - 18000)]:
+                    ROW_CACHE.pop(key, None)
+
+            return [rows_by_key[key] for key in keys]
     except Exception as exc:
         raise HTTPException(
             status_code=502,
