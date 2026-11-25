@@ -101,7 +101,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
    <button id="aiClearBtn">AI 레이어 지우기</button>
   </div>
   <div id="aiSummary" class="hint" style="margin-top:8px">ECMWF AIFS AI + IFS 모델 연결 대기 중</div>
-  <div class="hint">컬러 레이어: AI 난기류 위험지수. 바람 입자·흐름 애니메이션과 등압선·지위고도 등고선은 표시하지 않습니다.</div><div class="hint">위험지수는 EDR 실측값이나 승인된 난기류 예보가 아닌 실험적 선별값입니다.</div>
+  <div class="hint">컬러 레이어: AI 난기류 위험지수. 바람 입자·흐름 애니메이션과 등압선·지위고도 등고선은 표시하지 않습니다.</div><div class="hint">기상자료 출처: ECMWF Open Data (IFS / AIFS), 0.25° GRIB2 · AWS 공개 미러 · CC BY 4.0</div><div class="hint">위험지수는 EDR 실측값이나 승인된 난기류 예보가 아닌 실험적 선별값입니다.</div>
   <div class="hint">NOAA SIGMET / PIREP은 Cloudflare Worker 중계로 수신합니다. Worker 주소는 noaa-proxy-config.js에 설정합니다.</div>
  </section>
  <section class="panel">
@@ -508,7 +508,7 @@ async function fetchEcmwfGrid(model,points,horizon){
   body:JSON.stringify({
    model:modelName,
    points:points.map(p=>({lat:Number(p.lat),lon:Number(p.lon)})),
-   hours:Math.min(48,Math.max(6,Number(horizon)||48))
+   hours:72
   })
  });
  const raw=await response.text();
@@ -519,7 +519,7 @@ async function fetchEcmwfGrid(model,points,horizon){
 }
 async function fetchEcmwfGridCached(model,points,horizon){
  const now=Date.now();
- const keyFor=p=>model+'|'+horizon+'|'+Number(p.lat).toFixed(2)+'|'+Number(p.lon).toFixed(2);
+ const keyFor=p=>model+'|'+Number(p.lat).toFixed(2)+'|'+Number(p.lon).toFixed(2);
  const unique=new Map();
  points.forEach(p=>unique.set(keyFor(p),p));
  const missing=[];
