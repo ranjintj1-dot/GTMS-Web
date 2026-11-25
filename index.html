@@ -660,50 +660,93 @@ async function refreshAiGrid(force=false){
   if(button)button.disabled=false;
  }
 }
+function buildCesiumRiskCanvas(valueKey){
+ const meta=aiGridMeta;
+ if(!meta||!aiGridResults.length)return null;
+ const samples=aiGridResults.filter(item=>{
+  const value=item[valueKey];
+  return value!==null&&value!==undefined&&Number.isFinite(Number(value));
+ });
+ if(samples.length<3)return null;
+ const canvas=document.createElement('canvas');
+ canvas.width=512;canvas.height=256;
+ const ctx=canvas.getContext('2d');
+ const image=ctx.createImageData(canvas.width,canvas.height);
+ const pixels=image.data;
+ const north=meta.north,south=meta.south,west=meta.west,east=meta.east;
+ const spanLon=Math.max(0.01,east-west),spanLat=Math.max(0.01,north-south);
+ const points=samples.map(item=>({
+  x:((item.point.displayLon??item.point.lon)-west)/spanLon,
+  y:(north-item.point.lat)/spanLat,
+  value:Number(item[valueKey])
+ }));
+ for(let py=0;py<canvas.height;py++){
+  const y=(py+0.5)/canvas.height;
+  for(let px=0;px<canvas.width;px++){
+   const x=(px+0.5)/canvas.width;
+   let total=0,weightSum=0,nearest=Infinity;
+   for(const p of points){
+    const dx=(x-p.x)*Math.max(0.15,Math.cos((north-(north-south)*y)*Math.PI/180));
+    const dy=(y-p.y),distance=dx*dx+dy*dy;
+    nearest=Math.min(nearest,distance);
+    const weight=1/Math.pow(distance+0.000025,1.08);
+    total+=p.value*weight;weightSum+=weight;
+   }
+   if(!weightSum)continue;
+   const value=total/weightSum;
+   const rgb=aiPalette(value);
+   const fade=Math.max(0,Math.min(1,1-nearest/0.14));
+   const alpha=Math.round(255*0.48*(0.55+0.45*fade));
+   const index=(py*canvas.width+px)*4;
+   pixels[index]=rgb[0];pixels[index+1]=rgb[1];pixels[index+2]=rgb[2];pixels[index+3]=alpha;
+  }
+ }
+ ctx.putImageData(image,0,0);
+ return canvas;
+}
+function addCesiumRiskOverlay(valueKey,visible){
+ if(!visible||!aiGridMeta)return;
+ const canvas=buildCesiumRiskCanvas(valueKey);
+ if(!canvas)return;
+ const west=aiGridMeta.west,east=aiGridMeta.east;
+ // Avoid a malformed Rectangle when the requested map crosses the date line.
+ if(east-west>180)return;
+ const rectangle=Cesium.Rectangle.fromDegrees(west,aiGridMeta.south,east,aiGridMeta.north);
+ const entity=cesiumViewer.entities.add({
+  rectangle:{
+   coordinates:rectangle,
+   material:new Cesium.ImageMaterialProperty({image:canvas,transparent:true}),
+   height:0,
+   outline:false
+  }
+ });
+ aiCesiumEntities.push(entity);
+}
 function renderAiCesiumLayers(){
  if(!cesiumViewer)return;
  aiCesiumEntities.forEach(entity=>cesiumViewer.entities.remove(entity));
  aiCesiumEntities=[];
- const meta=aiGridMeta;
- const dLat=meta?Math.abs(meta.north-meta.south)/Math.max(1,meta.rows-1):0.5;
- const dLon=meta?Math.abs(meta.east-meta.west)/Math.max(1,meta.cols-1):0.5;
- aiGridResults.forEach(item=>{
-  const {lat}=item.point;
-  const centerLon=item.point.displayLon??item.point.lon;
-  const west=centerLon-dLon/2,east=centerLon+dLon/2;
-  const north=lat+dLat/2,south=lat-dLat/2;
-  const layers=[
-   [item.combinedIndex,$('showAiRiskHeat').checked],
-   [item.mapCatIndex,$('showAiCat').checked],
-   [item.mapConvectiveIndex,$('showAiConvective').checked]
-  ];
-  layers.forEach(([index,visible])=>{
-   if(index==null||!visible)return;
-   const base=Cesium.Color.fromCssColorString(aiRiskColor(index));
-   const material=base.withAlpha(0.40);
-   const rect=Cesium.Rectangle.fromDegrees(west,south,east,north);
-   aiCesiumEntities.push(cesiumViewer.entities.add({
-    rectangle:{
-     coordinates:rect,
-     material,
-     height:9000,
-     outline:true,
-     outlineColor:Cesium.Color.fromCssColorString('#102b3c').withAlpha(0.75)
-    }
-   }));
-  });
-  if($('showWindFlow').checked&&Number.isFinite(item.flowU)&&Number.isFinite(item.flowV)){
-   const vectorLength=Math.min(dLat*0.45,0.45);
-   const lat2=lat+item.flowV*vectorLength/111320;
-   const lon2=centerLon+item.flowU*vectorLength/(111320*Math.max(0.15,Math.cos(lat*Math.PI/180)));
-   aiCesiumEntities.push(cesiumViewer.entities.add({
+ addCesiumRiskOverlay('combinedIndex',$('showAiRiskHeat').checked);
+ addCesiumRiskOverlay('mapCatIndex',$('showAiCat').checked);
+ addCesiumRiskOverlay('mapConvectiveIndex',$('showAiConvective').checked);
+
+ // Keep a sparse vector reference in 3D without drawing grid-cell boundaries.
+ if($('showWindFlow').checked){
+  aiGridResults.forEach((item,index)=>{
+   if(index%2!==0||!Number.isFinite(item.flowU)||!Number.isFinite(item.flowV))return;
+   const lat=item.point.lat,lon=item.point.displayLon??item.point.lon;
+   const length=25000;
+   const endLat=lat+item.flowV*length/111320;
+   const endLon=lon+item.flowU*length/(111320*Math.max(0.15,Math.cos(lat*Math.PI/180)));
+   const entity=cesiumViewer.entities.add({
     polyline:{
-     positions:Cesium.Cartesian3.fromDegreesArrayHeights([centerLon,lat,9800,lon2,lat2,9800]),
-     width:2,material:Cesium.Color.WHITE.withAlpha(0.88)
+     positions:Cesium.Cartesian3.fromDegreesArrayHeights([lon,lat,10000,endLon,endLat,10000]),
+     width:1.5,material:Cesium.Color.WHITE.withAlpha(0.68)
     }
-   }));
-  }
- });
+   });
+   aiCesiumEntities.push(entity);
+  });
+ }
 }
 function scheduleAiRefresh(){
  if(!$('aiAutoRefresh')?.checked)return;
