@@ -23,8 +23,8 @@ from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-APP_VERSION = "1.0.7"
-APP_RELEASE_ID = "gtms-noaa-primary-20261125-r4"
+APP_VERSION = "1.0.8"
+APP_RELEASE_ID = "gtms-noaa-primary-20261125-r5"
 logger = logging.getLogger("uvicorn.error")
 CACHE_DIR = Path(os.getenv("GTMS_GRIB_CACHE", "/tmp/gtms-ecmwf"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -50,7 +50,7 @@ app.add_middleware(
     ],
     # Render may serve previews/custom subdomains; allow HTTPS pages hosted on
     # Render while keeping arbitrary external origins blocked.
-    allow_origin_regex=r"https://[a-zA-Z0-9-]+\\.onrender\\.com",
+    allow_origin_regex=r"https://[a-zA-Z0-9-]+\.onrender\.com",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
