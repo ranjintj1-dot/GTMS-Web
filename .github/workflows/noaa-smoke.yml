@@ -5,7 +5,6 @@ on:
     branches: [main]
     paths:
       - "api/**"
-      - ".github/workflows/noaa-smoke.yml"
   workflow_dispatch:
 
 permissions:
@@ -24,14 +23,14 @@ jobs:
           ready=0
           for attempt in $(seq 1 60); do
             code="$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 20 "$BASE/health" || true)"
-            if [ "$code" = "200" ] && grep -q '"version":"1.0.2"' /tmp/health.json; then
+            if [ "$code" = "200" ] && grep -q '"version":"1.0.4"' /tmp/health.json && grep -q '"release":"gtms-noaa-primary-20261125-r1"' /tmp/health.json; then
               ready=1
               break
             fi
             sleep 10
           done
           if [ "$ready" != "1" ]; then
-            echo "GTMS weather gateway did not deploy the expected version 1.0.2"
+            echo "GTMS weather gateway did not deploy the expected version 1.0.4"
             cat /tmp/health.json 2>/dev/null || true
             exit 1
           fi
@@ -85,7 +84,7 @@ jobs:
               speeds = hourly.get("wind_speed_250hPa", [])
               assert any(value is not None for value in speeds), row
               assert any(value is not None for value in hourly.get("wind_speed_300hPa", [])), row
-              assert row.get("source"), row
+              assert row.get("source") == "NOAA GFS BDP S3 0.25°", row
           print("PASS: GTMS /api/forecast returned two usable upper-air grid points.")
           print("Sources:", sorted({row.get("source") for row in rows}))
           PY

@@ -22,7 +22,8 @@ from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
+APP_RELEASE_ID = "gtms-noaa-primary-20261125-r1"
 logger = logging.getLogger("uvicorn.error")
 CACHE_DIR = Path(os.getenv("GTMS_GRIB_CACHE", "/tmp/gtms-ecmwf"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -295,12 +296,18 @@ def _gfs_complete_cycles() -> list[datetime]:
     return [cycle for cycle in candidates if (now - cycle).total_seconds() >= 4 * 3600] or candidates[1:]
 
 
-def _gfs_cache_file(cycle: datetime) -> Path:
-    return CACHE_DIR / f"noaa_gfs_{cycle:%Y%m%d_%H}_0p25.grib2"
+def _gfs_cache_file(cycle: datetime, points: list[Point]) -> Path:
+    lons = [point.lon % 360.0 for point in points]
+    left = max(0.0, math.floor(min(lons) - 1.0))
+    right = min(359.75, math.ceil(max(lons) + 1.0))
+    bottom = max(-89.75, math.floor(min(point.lat for point in points) - 1.0))
+    top = min(89.75, math.ceil(max(point.lat for point in points) + 1.0))
+    region = f"{left:.0f}_{right:.0f}_{bottom:.0f}_{top:.0f}"
+    return CACHE_DIR / f"noaa_gfs_{cycle:%Y%m%d_%H}_{region}_0p25.grib2"
 
 
 def _download_gfs_cycle(cycle: datetime, points: list[Point], hours: int) -> Path:
-    cache_path = _gfs_cache_file(cycle)
+    cache_path = _gfs_cache_file(cycle, points)
     if cache_path.exists() and cache_path.stat().st_size > 1000:
         if time.time() - cache_path.stat().st_mtime < 6 * 3600:
             return cache_path
@@ -507,6 +514,7 @@ def health():
         "status": "ok",
         "service": "GTMS ECMWF Open Data Gateway",
         "version": APP_VERSION,
+        "release": APP_RELEASE_ID,
         "source": "NOAA GFS BDP public S3 0.25 degree (primary)",
         "backup_source": "ECMWF AIFS / IFS Open Data",
         "noaa_gfs_source": "NOAA GFS BDP public S3 + .idx byte-range retrieval",

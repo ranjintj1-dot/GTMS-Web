@@ -904,7 +904,6 @@ async function refreshFeeds(){
 
  feedRows.push('<tr><td>NOAA GFS 0.25°</td><td>기본 공급원 · AWS 공개 GRIB</td><td><a href="https://registry.opendata.aws/noaa-gfs-bdp-pds/" target="_blank" rel="noopener">공식 자료</a></td></tr>');
  feedRows.push('<tr><td>ECMWF AIFS / IFS Open Data</td><td>NOAA GFS 장애 시 보조 자료</td><td><a href="https://www.ecmwf.int/en/forecasts/datasets/open-data" target="_blank" rel="noopener">공식 자료</a></td></tr>');
- feedRows.push('<tr><td>NOAA GFS 0.25°</td><td>ECMWF 응답 실패 시 자동 대체</td><td><a href="https://nomads.ncep.noaa.gov/" target="_blank" rel="noopener">NOMADS</a></td></tr>');
  $('feedTable').innerHTML='<table><tr><th>자료</th><th>상태</th><th>조회</th></tr>'+feedRows.join('')+'</table>';
  statuses.push('<span style="color:#86efac">● NOAA GFS BDP S3 0.25° 기본 / ECMWF AIFS·IFS 보조</span>');
  statuses.push('<span style="color:#9bb5c7">PIREP/AIREP 자료 범위는 주로 미국·북대서양이며 전 세계를 완전히 포괄하지 않습니다.</span>');
