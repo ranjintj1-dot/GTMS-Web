@@ -23,8 +23,8 @@ from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-APP_VERSION = "1.0.9"
-APP_RELEASE_ID = "gtms-noaa-primary-20261126-aviation-proxy-r1"
+APP_VERSION = "1.0.10"
+APP_RELEASE_ID = "gtms-noaa-primary-20261126-aviation-proxy-r2"
 logger = logging.getLogger("uvicorn.error")
 CACHE_DIR = Path(os.getenv("GTMS_GRIB_CACHE", "/tmp/gtms-ecmwf"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -41,7 +41,7 @@ ROW_CACHE_TTL = 6 * 3600
 AVIATION_WEATHER_BASE = "https://aviationweather.gov/api/data"
 AVIATION_WEATHER_PRODUCTS = {
     "sigmets": f"{AVIATION_WEATHER_BASE}/sigmet?format=geojson",
-    "pireps": f"{AVIATION_WEATHER_BASE}/pirep?format=geojson&age=6",
+    "pireps": f"{AVIATION_WEATHER_BASE}/pirep?bbox=20,-179,72,-44&age=6&format=geojson",
 }
 AVIATION_WEATHER_CACHE_TTL = 60
 AVIATION_WEATHER_CACHE: dict[str, tuple[float, dict]] = {}
