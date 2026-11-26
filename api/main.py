@@ -25,8 +25,8 @@ from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-APP_VERSION = "1.0.11"
-APP_RELEASE_ID = "gtms-noaa-primary-20261126-flight-route-r1"
+APP_VERSION = "1.0.12"
+APP_RELEASE_ID = "gtms-noaa-primary-20261126-flight-route-r2"
 logger = logging.getLogger("uvicorn.error")
 CACHE_DIR = Path(os.getenv("GTMS_GRIB_CACHE", "/tmp/gtms-ecmwf"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -324,7 +324,10 @@ def _build_rows(
 ) -> list[dict]:
     available_steps = GFS_FORECAST_STEPS if model == "gfs" else FORECAST_STEPS
     elapsed_hours = max(0, int((datetime.now(timezone.utc) - cycle).total_seconds() // 3600))
-    last_step = min(max(available_steps), hours + elapsed_hours)
+    # Round up to the next six-hour forecast valid time. The route ETA may
+    # fall between GFS cycles (e.g. +17 h); include the +18 h field so the
+    # browser can select the closest valid forecast rather than truncating it.
+    last_step = min(max(available_steps), int(math.ceil((hours + elapsed_hours) / 6.0) * 6))
     steps = [step for step in available_steps if step <= last_step]
     rows: list[dict] = []
     for point_index, _ in enumerate(points):
