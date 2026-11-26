@@ -839,7 +839,6 @@ function buildFlightSchedule(route){
   const groundspeed=Math.max(300,Math.min(1200,Number($('groundSpeed').value)||850));
   arrivalMs=departureMs+(totalDistance/groundspeed)*3600000;
   estimatedArrival=true;
-  $('arriveTime').value=utcInputValue(new Date(arrivalMs));
  }
  if(arrivalMs<=departureMs)throw Error('예정 도착시각은 출발시각보다 늦어야 합니다.');
  const durationHours=(arrivalMs-departureMs)/3600000;
@@ -1059,7 +1058,12 @@ async function loadExcel(file){
  const latK=find(['lat','latitude','위도']),lonK=find(['lon','lng','longitude','경도']);
  if(!latK||!lonK)throw Error('위도(latitude/lat)와 경도(longitude/lon) 열이 필요합니다.');
  const altK=find(['altitudeft','altft','고도']),timeK=find(['time','timestamp','datetime','utc','시간']);
- return rows.map(r=>({lat:Number(r[latK]),lon:Number(r[lonK]),alt_ft:Number(r[altK]||$('flightLevel').value),time:timeK&&r[timeK]!=null?String(r[timeK]):null})).filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
+ const timeValue=v=>{
+  if(v instanceof Date)return v.toISOString();
+  if(typeof v==='number'&&v>1000&&v<100000)return new Date(Date.UTC(1899,11,30)+v*86400000).toISOString();
+  return v==null?null:String(v);
+ };
+ return rows.map(r=>({lat:Number(r[latK]),lon:Number(r[lonK]),alt_ft:Number(r[altK]||$('flightLevel').value),time:timeK?timeValue(r[timeK]):null})).filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
 }
 document.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-tab]').forEach(x=>x.classList.toggle('active',x===b));['manual','kml','gpx','excel'].forEach(k=>$(k+'Pane').hidden=k!==b.dataset.tab)}));
 $('plotRoute').onclick=async()=>{
@@ -1395,7 +1399,7 @@ function recalculateFlightTiming(){
   buildFlightSchedule(currentRoute);
   updateFlightPlanStatus();
   setFlightProgress(progress);
-  assessRoute(true);
+  assessRoute(false);
  }catch(e){$('flightPlanStatus').textContent=e.message}
 }
 $('flightLevel').onchange=()=>{
