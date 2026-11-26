@@ -1380,8 +1380,8 @@ $('aiClearBtn').onclick=()=>{
 });
 $('aiModel').onchange=()=>refreshAiGrid(true);
 $('windPressure').onchange=()=>{
+ if(flightSchedule){assessRoute(true);return}
  refreshAiGrid(true,true);
- if(flightSchedule)assessRoute(true);
 };
 function pressureForFlightLevel(feet){
  const fl=Number(feet)||35000;
@@ -1406,14 +1406,14 @@ function recalculateFlightTiming(){
 }
 $('flightLevel').onchange=()=>{
  syncFlightAltitude();
+ if(flightSchedule){assessRoute(true);return}
  refreshAiGrid(true,true);
- if(flightSchedule)assessRoute(true);
 };
 $('altitude').onchange=()=>{
  $('flightLevel').value=$('altitude').value;
  syncFlightAltitude();
+ if(flightSchedule){assessRoute(true);return}
  refreshAiGrid(true,true);
- if(flightSchedule)assessRoute(true);
 };
 ['departTime','arriveTime','groundSpeed'].forEach(id=>$(id).onchange=recalculateFlightTiming);
 function syncAiTimeline(){
