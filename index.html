@@ -1238,6 +1238,7 @@ function flightForecastHours(){
 function evaluateRouteRows(samples,modelRows,hours,pressure){
  return samples.map((point,index)=>{
   const targetLead=(point.etaMs-Date.now())/3600000;
+  if(targetLead< -0.5)return {p:point,etaMs:point.etaMs,score:null,category:'시간 경과',error:'예정 통과시각이 현재보다 이전입니다. 과거 관측자료는 이 예보에서 제공하지 않습니다.'};
   if(targetLead>hours+0.25)return {p:point,etaMs:point.etaMs,score:null,category:'예보 범위 밖',error:'48시간 예보 범위 초과'};
   const result=evaluateModelPoint(modelRows[index],hours,targetLead,pressure);
   const selected=result?.selected;
