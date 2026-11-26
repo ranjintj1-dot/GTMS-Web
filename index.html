@@ -745,7 +745,7 @@ function renderAiCesiumLayers(){
  addCesiumRiskOverlay('mapConvectiveIndex',$('showAiConvective').checked);
 }
 function scheduleAiRefresh(){
- if(!$('aiAutoRefresh')?.checked)return;
+ if(!$('aiAutoRefresh')?.checked||(currentRoute.length>1&&flightSchedule))return;
  if(aiRefreshTimer)clearTimeout(aiRefreshTimer);
  aiRefreshTimer=setTimeout(()=>refreshAiGrid(false),2500);
 }
@@ -1058,23 +1058,55 @@ async function loadExcel(file){
  const keys=Object.keys(rows[0]);const find=names=>keys.find(k=>names.includes(norm(k)));
  const latK=find(['lat','latitude','위도']),lonK=find(['lon','lng','longitude','경도']);
  if(!latK||!lonK)throw Error('위도(latitude/lat)와 경도(longitude/lon) 열이 필요합니다.');
- return rows.map(r=>({lat:Number(r[latK]),lon:Number(r[lonK]),alt_ft:Number(r[find(['altitudeft','altft','고도'])]||$('flightLevel').value)})).filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
+ const altK=find(['altitudeft','altft','고도']),timeK=find(['time','timestamp','datetime','utc','시간']);
+ return rows.map(r=>({lat:Number(r[latK]),lon:Number(r[lonK]),alt_ft:Number(r[altK]||$('flightLevel').value),time:timeK&&r[timeK]!=null?String(r[timeK]):null})).filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
 }
 document.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-tab]').forEach(x=>x.classList.toggle('active',x===b));['manual','kml','gpx','excel'].forEach(k=>$(k+'Pane').hidden=k!==b.dataset.tab)}));
 $('plotRoute').onclick=async()=>{
  try{
+  stopFlightAnimation();
   const tab=document.querySelector('[data-tab].active').dataset.tab;
-  if(tab==='manual')currentRoute=parseCoords();
+  if(tab==='manual'){
+   if($('coords').value.trim())currentRoute=parseCoords();
+   else await lookupAndGenerateAirportRoute();
+  }
   if(tab==='kml'){const f=$('kmlFile').files[0];if(!f)throw Error('KML 파일을 선택하세요.');currentRoute=parseKML(await f.text())}
   if(tab==='gpx'){const f=$('gpxFile').files[0];if(!f)throw Error('GPX 파일을 선택하세요.');currentRoute=parseGPX(await f.text())}
   if(tab==='excel'){const f=$('excelFile').files[0];if(!f)throw Error('Excel/CSV 파일을 선택하세요.');currentRoute=await loadExcel(f)}
   if(currentRoute.length<2)throw Error('항로 좌표가 2개 이상 필요합니다.');
   $('flightNo').value=$('flightNo').value.trim().toUpperCase()||'UNASSIGNED';
-  drawRoute();await assessRoute();
- }catch(e){alert(e.message)}
+  currentRoute=normaliseRouteDisplay(currentRoute);
+  buildFlightSchedule(currentRoute);
+  updateFlightPlanStatus();
+  $('flightProgress').value='0';
+  setFlightProgress(0);
+  drawRoute(true);
+  await assessRoute(false);
+ }catch(e){
+  $('flightPlanStatus').textContent=e.message;
+  alert(e.message);
+ }
 };
-$('clearRoute').onclick=()=>{currentRoute=[];routeLayer.clearLayers();riskLayer.clearLayers();$('routeRows').innerHTML='<tr><td colspan="5">항로를 입력하고 분석을 실행하세요.</td></tr>';['kpiSegments','kpiPirep','kpiSigmet'].forEach(k=>$(k).textContent='0');$('kpiRisk').textContent='-'};
-$('showRoute').onchange=e=>e.target.checked?routeLayer.addTo(map):map.removeLayer(routeLayer);
+$('clearRoute').onclick=()=>{
+ stopFlightAnimation();
+ currentRoute=[];flightSchedule=null;routeAssessments=[];routeForecastSnapshot=null;
+ routeLayer.clearLayers();riskLayer.clearLayers();planeLayer.clearLayers();planeMarker=null;
+ $('routeRows').innerHTML='<tr><td colspan="6">항공편 정보를 입력하고 항로 분석을 실행하세요.</td></tr>';
+ $('flightPlanStatus').textContent='항로가 초기화되었습니다.';
+ $('flightProgress').value='0';$('flightProgressLabel').textContent='0%';
+ ['kpiSegments','kpiPirep','kpiSigmet'].forEach(k=>$(k).textContent='0');
+ $('kpiRisk').textContent='-';
+};
+$('flightPlay').onclick=toggleFlightAnimation;
+$('flightProgress').oninput=()=>{stopFlightAnimation();setFlightProgress(Number($('flightProgress').value))};
+$('showRoute').onchange=e=>{
+ if(e.target.checked){
+  routeLayer.addTo(map);
+  if(flightSchedule)planeLayer.addTo(map);
+ }else{
+  map.removeLayer(routeLayer);map.removeLayer(planeLayer);
+ }
+};
 $('showSigmet').onchange=e=>e.target.checked?sigmetLayer.addTo(map):map.removeLayer(sigmetLayer);
 $('showPirep').onchange=e=>e.target.checked?pirepLayer.addTo(map):map.removeLayer(pirepLayer);
 $('showRisk').onchange=()=>renderAssessment();
@@ -1341,7 +1373,43 @@ $('aiClearBtn').onclick=()=>{
  $(id).onchange=()=>{setCanvasLayerVisibility();renderAiCesiumLayers()};
 });
 $('aiModel').onchange=()=>refreshAiGrid(true);
-$('windPressure').onchange=()=>refreshAiGrid(true);
+$('windPressure').onchange=()=>{
+ refreshAiGrid(true,true);
+ if(flightSchedule)assessRoute(true);
+};
+function pressureForFlightLevel(feet){
+ const fl=Number(feet)||35000;
+ return fl>=38000?200:fl>=32000?250:300;
+}
+function syncFlightAltitude(){
+ const fl=Number($('flightLevel').value)||35000;
+ const options=Array.from($('altitude').options).map(o=>Number(o.value));
+ const nearest=options.sort((a,b)=>Math.abs(a-fl)-Math.abs(b-fl))[0];
+ if(nearest)$('altitude').value=String(nearest);
+ $('windPressure').value=String(pressureForFlightLevel(fl));
+}
+function recalculateFlightTiming(){
+ if(!flightSchedule||currentRoute.length<2)return;
+ try{
+  const progress=Number($('flightProgress').value)||0;
+  buildFlightSchedule(currentRoute);
+  updateFlightPlanStatus();
+  setFlightProgress(progress);
+  assessRoute(true);
+ }catch(e){$('flightPlanStatus').textContent=e.message}
+}
+$('flightLevel').onchange=()=>{
+ syncFlightAltitude();
+ refreshAiGrid(true,true);
+ if(flightSchedule)assessRoute(true);
+};
+$('altitude').onchange=()=>{
+ $('flightLevel').value=$('altitude').value;
+ syncFlightAltitude();
+ refreshAiGrid(true,true);
+ if(flightSchedule)assessRoute(true);
+};
+['departTime','arriveTime','groundSpeed'].forEach(id=>$(id).onchange=recalculateFlightTiming);
 function syncAiTimeline(){
  const lead=Number($('aiForecastHour').value)||0;
  $('aiTimelineSlider').value=String(lead);
@@ -1352,8 +1420,8 @@ $('aiTimelineSlider').oninput=()=>{
  $('aiForecastHour').value=$('aiTimelineSlider').value;
  syncAiTimeline();
 };
-$('aiTimelineSlider').onchange=()=>refreshAiGrid(true);
-$('aiForecastHour').onchange=()=>{syncAiTimeline();refreshAiGrid(true)};
+$('aiTimelineSlider').onchange=()=>refreshAiGrid(true,!!aiGridSnapshot);
+$('aiForecastHour').onchange=()=>{syncAiTimeline();refreshAiGrid(true,!!aiGridSnapshot)};
 $('horizon').onchange=()=>{
  const selected=Number($('aiForecastHour').value)||0;
  if(selected>Number($('horizon').value))$('aiForecastHour').value=String(Number($('horizon').value));
@@ -1361,23 +1429,26 @@ $('horizon').onchange=()=>{
  refreshAiGrid(true);
 };
 syncAiTimeline();
-$('aiAutoRefresh').onchange=()=>{if($('aiAutoRefresh').checked)refreshAiGrid(true)};
+if(!$('departTime').value)$('departTime').value=utcInputValue(new Date());
+syncFlightAltitude();
+$('aiAutoRefresh').onchange=()=>{if($('aiAutoRefresh').checked&&currentRoute.length<2)refreshAiGrid(true)};
 map.on('moveend zoomend',scheduleAiRefresh);
 // ECMWF forecast cycles are not updated every 15 minutes. Keep automatic refresh infrequent.
-setInterval(()=>{if($('aiAutoRefresh').checked)refreshAiGrid(false)},60*60*1000);
+setInterval(()=>{if($('aiAutoRefresh').checked&&currentRoute.length<2)refreshAiGrid(false)},60*60*1000);
 $('refreshBtn').onclick=refreshFeeds;
 $('map2d').onclick=()=>{ $('map').style.display='block';$('cesiumMap').style.display='none';$('map2d').classList.add('active');$('map3d').classList.remove('active');setTimeout(()=>map.invalidateSize(),100)};
 $('map3d').onclick=()=>{
  $('map').style.display='none';$('cesiumMap').style.display='block';$('map3d').classList.add('active');$('map2d').classList.remove('active');
  if(!cesiumViewer){try{cesiumViewer=new Cesium.Viewer('cesiumMap',{animation:false,timeline:false,baseLayerPicker:true,geocoder:false,homeButton:true,sceneModePicker:true,navigationHelpButton:false,infoBox:false,selectionIndicator:false});cesiumViewer.camera.flyHome(0); }catch(e){alert('3D 지도를 초기화하지 못했습니다: '+e.message)}}
  if(cesiumViewer){
-  cesiumViewer.entities.removeAll();aiCesiumEntities=[];
+  cesiumViewer.entities.removeAll();aiCesiumEntities=[];cesiumPlaneEntity=null;
   if(currentRoute.length>1){
-   const pts=currentRoute.map(p=>Cesium.Cartesian3.fromDegrees(p.lon,p.lat,(p.alt_ft||35000)*0.3048));
+   const pts=currentRoute.map(p=>Cesium.Cartesian3.fromDegrees(p.displayLon??p.lon,p.lat,(p.alt_ft||35000)*0.3048));
    cesiumViewer.entities.add({polyline:{positions:pts,width:4,material:Cesium.Color.CYAN}});
    pts.forEach((pt,i)=>cesiumViewer.entities.add({position:pt,point:{pixelSize:i===0||i===pts.length-1?9:5,color:Cesium.Color.CYAN}}));
   }
   renderAiCesiumLayers();
+  if(flightSchedule)setFlightProgress(Number($('flightProgress').value)||0);
   if(cesiumViewer.entities.values.length)cesiumViewer.zoomTo(cesiumViewer.entities);
  }
 };
