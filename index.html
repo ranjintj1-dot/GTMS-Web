@@ -1192,49 +1192,75 @@ async function refreshFeeds(){
  if($('showPirep').checked)pirepLayer.addTo(map);else map.removeLayer(pirepLayer);
 }
 function interpolate(a,b,t){return {lat:a.lat+(b.lat-a.lat)*t,lon:a.lon+(b.lon-a.lon)*t}}
-async function assessRoute(){
- if(currentRoute.length<2)return;
- const samples=[];
- for(let i=0;i<currentRoute.length-1;i++){
-  for(let j=0;j<2;j++)samples.push(interpolate(currentRoute[i],currentRoute[i+1],j/2));
- }
- samples.push(currentRoute[currentRoute.length-1]);
- const unique=samples.filter((p,i)=>i%Math.max(1,Math.ceil(samples.length/10))===0);
- if(unique[unique.length-1]!==samples[samples.length-1])unique.push(samples[samples.length-1]);
- const hours=Number($('horizon').value)||48;
- $('routeRows').innerHTML='<tr><td colspan="5">NOAA GFS 기본 예보자료로 항로 기상자료를 조회하고 있습니다…</td></tr>';
- let rows=[];
+function flightForecastHours(){
+ const maxLead=(flightSchedule.arrivalMs-Date.now())/3600000;
+ if(maxLead>48)throw Error('예정 도착시각이 현재로부터 48시간 이후입니다. NOAA GFS 예보 범위는 최대 48시간입니다.');
+ return Math.max(6,Math.min(48,Math.ceil(Math.max(0,maxLead)/6)*6));
+}
+function evaluateRouteRows(samples,modelRows,hours,pressure){
+ return samples.map((point,index)=>{
+  const targetLead=(point.etaMs-Date.now())/3600000;
+  if(targetLead>hours+0.25)return {p:point,etaMs:point.etaMs,score:null,category:'예보 범위 밖',error:'48시간 예보 범위 초과'};
+  const result=evaluateModelPoint(modelRows[index],hours,targetLead,pressure);
+  const selected=result?.selected;
+  if(!selected)return {p:point,etaMs:point.etaMs,score:null,category:'자료없음',error:'해당 시각의 예보자료 없음'};
+  const validTimeMs=modelTimeMilliseconds(selected.time);
+  const timeDifferenceHours=Math.abs(validTimeMs-point.etaMs)/3600000;
+  if(!Number.isFinite(validTimeMs)||timeDifferenceHours>3.15){
+   return {p:point,etaMs:point.etaMs,score:null,category:'시각 불일치',error:'가장 가까운 예보와 예정시각 차이 '+timeDifferenceHours.toFixed(1)+' h'};
+  }
+  const indexValue=Math.max(selected.catIndex??-1,selected.convectiveIndex??-1);
+  if(indexValue<0)return {p:point,etaMs:point.etaMs,score:null,category:'자료없음',error:'유효한 CAT/대류성 지표 없음'};
+  const score=indexValue>=85?4:indexValue>=70?3:indexValue>=50?2:indexValue>=30?1:0;
+  const flow=selected.flow;
+  return {
+   p:point,etaMs:point.etaMs,score,
+   category:['낮음','주의','높음','매우 높음','매우 높음'][score],
+   time:selected.time,wind:flow?.speed??null,dir:flow?.direction??null,
+   shear:selected.shearMsKm??null,catIndex:selected.catIndex??null,
+   convectiveIndex:selected.convectiveIndex??null,pressure
+  };
+ });
+}
+async function assessRoute(reuseOnly=false){
+ if(currentRoute.length<2||!flightSchedule)return;
+ const samples=buildTimedWeatherSamples(32);
+ const hours=flightForecastHours();
+ const pressure=Number($('windPressure').value)||250;
+ const key=samples.map(p=>Number(p.lat).toFixed(3)+','+Number(p.lon).toFixed(3)).join(';');
+ $('routeRows').innerHTML='<tr><td colspan="6">항공편 각 지점의 예정 통과시각에 맞춰 NOAA GFS 기상자료를 분석하고 있습니다…</td></tr>';
+ aiCacheStats={requests:0,fetchedPoints:0,reusedPoints:0};
+ aiDataSources=new Set();
  try{
-  aiCacheStats={requests:0,fetchedPoints:0,reusedPoints:0};
-  aiDataSources=new Set();
-  const modelRows=await fetchEcmwfGridCached('ecmwf_ifs025',unique,hours);
-  rows=unique.map((point,index)=>{
-   const result=evaluateModelPoint(modelRows[index],hours,Number($('aiForecastHour').value)||0,Number($('windPressure').value)||250);
-   const cat=result?.cat,conv=result?.convective;
-   const indexValue=Math.max(cat?.index??-1,conv?.index??-1);
-   if(indexValue<0)return {p:point,score:null,category:'자료없음',error:'유효한 CAT/대류성 지표 없음'};
-   const score=indexValue>=85?4:indexValue>=70?3:indexValue>=50?2:indexValue>=30?1:0;
-   const flow=result?.selected?.flow;
-   return {
-    p:point,score,category:['낮음','주의','높음','매우 높음','매우 높음'][score],
-    time:cat?.time||conv?.time||result?.selected?.time||'-',
-    wind:flow?.speed??null,dir:flow?.direction??null,
-    shear:cat?.shearMsKm??result?.selected?.shearMsKm??null,
-    catIndex:cat?.index??null,convectiveIndex:conv?.index??null
-   };
-  });
+  const cached=routeForecastSnapshot&&routeForecastSnapshot.key===key&&
+   routeForecastSnapshot.horizon>=hours&&Date.now()-routeForecastSnapshot.savedAt<AI_MODEL_CACHE_TTL;
+  if(reuseOnly&&!cached){
+   $('routeRows').innerHTML='<tr><td colspan="6">항로 예보 캐시가 없습니다. 항로 기상 분석을 다시 실행하세요.</td></tr>';
+   return;
+  }
+  let modelRows;
+  if(cached){
+   modelRows=routeForecastSnapshot.rows;
+   aiCacheStats.reusedPoints=samples.length;
+   modelRows.forEach(row=>{if(row?.source)aiDataSources.add(String(row.source))});
+  }else{
+   modelRows=await fetchEcmwfGridCached('ecmwf_aifs025_single',samples,hours);
+   routeForecastSnapshot={key,rows:modelRows,horizon:hours,savedAt:Date.now()};
+  }
+  routeAssessments=evaluateRouteRows(samples,modelRows,hours,pressure);
+  renderAssessment();
+  const failures=routeAssessments.filter(r=>r.score===null).length;
+  const valid=routeAssessments.length-failures;
+  setFeed(
+   '<span style="color:'+(failures?'#fcd34d':'#86efac')+'">● '+esc(Array.from(aiDataSources).join(' + ')||'NOAA GFS')+': 항로 시각별 분석 완료</span><br>'+
+   '비행편 '+esc($('flightNo').value)+' · 조회 지점 '+routeAssessments.length+'개 · 유효 '+valid+'개 · 자료 누락 '+failures+'개'+
+   '<br>각 지점 ETA 기준 가장 가까운 6시간 간격 예보를 자동 적용 · '+hours+'시간 예보 범위'
+  );
  }catch(error){
-  rows=unique.map(point=>({p:point,score:null,category:'자료없음',error:error.message}));
+  routeAssessments=samples.map(point=>({p:point,etaMs:point.etaMs,score:null,category:'자료없음',error:error.message}));
+  renderAssessment();
+  setFeed('<span style="color:#fca5a5">● 항로 기상 조회 실패: '+esc(error.message)+'</span>');
  }
- routeAssessments=rows;
- renderAssessment();
- const failures=rows.filter(r=>r.score===null).length;
- const valid=rows.length-failures;
- setFeed(
-  '<span style="color:'+(failures?'#fcd34d':'#86efac')+'">● '+esc(Array.from(aiDataSources).join(' + ')||'GTMS 공개 기상자료')+': 항로 분석 '+(failures?'부분':'')+'완료</span><br>'+
-  '조회 지점 '+rows.length+'개 · 유효 '+valid+'개 · 자료 누락 '+failures+'개 · '+hours+'시간 범위'+
-  '<br><span style="color:#9bb5c7">NOAA GFS 0.25° 기본 · ECMWF 자동 대체</span>'
- );
 }
 function renderAssessment(){
  const rows=routeAssessments;
@@ -1245,7 +1271,7 @@ function renderAssessment(){
  // Base flight path and turbulence-risk overlays are separate Leaflet layers.
  routeLayer.clearLayers();
  riskLayer.clearLayers();
- drawRoute();
+ drawRoute(false);
 
  if($('showRisk').checked && rows.length){
   // Draw risk-area buffers around every forecast sample point.
@@ -1255,7 +1281,7 @@ function renderAssessment(){
    const level=Math.max(0,Math.min(4,Number(r.score)||0));
    const color=riskColor(level);
    const radius=radiusByLevel[level];
-   L.circle([r.p.lat,r.p.lon],{
+   L.circle([r.p.lat,r.p.displayLon??r.p.lon],{
     radius,
     color,
     weight:2,
@@ -1265,9 +1291,9 @@ function renderAssessment(){
     interactive:true
    }).bindPopup(
     `<b>난기류 위험구역 · ${riskLabel(level)}</b><br>`+
-    `분석 지점: ${i+1}<br>고도: FL${Math.round(Number($('altitude').value)/100)}<br>`+
-    `수직시어: ${r.shear??'-'} m/s/km<br>`+
-    `자료 시각: ${r.time??'-'}<br>`+
+    `항공편: ${esc($('flightNo').value)}<br>예정 통과: ${r.etaMs?new Date(r.etaMs).toISOString().slice(0,16)+' UTC':'-'}<br>`+
+    `고도: FL${Math.round(Number(r.p.alt_ft||$('flightLevel').value)/100)}<br>`+
+    `수직시어: ${r.shear??'-'} m/s/km<br>예보 유효: ${r.time??'-'}<br>`+
     `표시 반경: ${Math.round(radius/1000)} km`
    ).addTo(riskLayer);
   });
@@ -1280,7 +1306,7 @@ function renderAssessment(){
    if(!prev || prev.score===null || prev.score===undefined)return;
    const level=Math.max(0,Math.min(4,Number(r.score)||0));
    const color=riskColor(level);
-   const positions=[[prev.p.lat,prev.p.lon],[r.p.lat,r.p.lon]];
+   const positions=[[prev.p.lat,prev.p.displayLon??prev.p.lon],[r.p.lat,r.p.displayLon??r.p.lon]];
    L.polyline(positions,{color,weight:20,opacity:.20,lineCap:'round',lineJoin:'round'}).addTo(riskLayer);
    L.polyline(positions,{color,weight:7,opacity:.95,lineCap:'round',lineJoin:'round'})
     .bindPopup(
@@ -1299,9 +1325,9 @@ function renderAssessment(){
  rows.forEach((r,i)=>{
   const score=r.score;
   const badgeClass=score===null||score===undefined?'b-blue':score>=4?'b-red':score===3?'b-orange':score===2?'b-yellow':score===1?'b-green':'b-blue';
-  html+=`<tr><td>${i+1}</td><td>${r.p.lat.toFixed(2)}, ${r.p.lon.toFixed(2)}</td><td>FL${Math.round(Number($('altitude').value)/100)}</td><td><span class="badge ${badgeClass}">${r.category||'자료없음'}</span></td><td>${r.shear!=null?'수직시어 '+r.shear+' m/s/km':esc(r.error||'자료 없음')}</td></tr>`;
+  html+=`<tr><td>${i+1}</td><td>${r.etaMs?new Date(r.etaMs).toISOString().slice(0,16).replace('T',' '):'-'}</td><td>${r.p.lat.toFixed(2)}, ${wrapLongitude(r.p.lon).toFixed(2)}</td><td>FL${Math.round(Number(r.p.alt_ft||$('flightLevel').value)/100)}</td><td><span class="badge ${badgeClass}">${r.category||'자료없음'}</span></td><td>${r.wind!=null?r.wind.toFixed(1)+' m/s · '+(r.dir??'-')+'°':'-'}<br><small>${esc(r.time||r.error||'-')}</small></td></tr>`;
  });
- $('routeRows').innerHTML=html||'<tr><td colspan="5">분석 결과가 없습니다.</td></tr>';
+ $('routeRows').innerHTML=html||'<tr><td colspan="6">분석 결과가 없습니다.</td></tr>';
 }
 $('aiRefreshBtn').onclick=()=>refreshAiGrid(true);
 $('aiClearBtn').onclick=()=>{
