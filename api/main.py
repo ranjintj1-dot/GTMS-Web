@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 import os
+import csv
+import io
 import logging
 import threading
 import requests
@@ -23,8 +25,8 @@ from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-APP_VERSION = "1.0.10"
-APP_RELEASE_ID = "gtms-noaa-primary-20261126-aviation-proxy-r2"
+APP_VERSION = "1.0.11"
+APP_RELEASE_ID = "gtms-noaa-primary-20261126-flight-route-r1"
 logger = logging.getLogger("uvicorn.error")
 CACHE_DIR = Path(os.getenv("GTMS_GRIB_CACHE", "/tmp/gtms-ecmwf"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -47,6 +49,14 @@ AVIATION_WEATHER_CACHE_TTL = 60
 AVIATION_WEATHER_CACHE: dict[str, tuple[float, dict]] = {}
 AVIATION_WEATHER_LOCK = threading.RLock()
 EMPTY_FEATURE_COLLECTION = {"type": "FeatureCollection", "features": []}
+
+# ICAO airport coordinates are used to draw an estimated great-circle route
+# when no OFP/KML/GPX waypoints have been supplied.
+AIRPORT_DATA_URL = "https://davidmegginson.github.io/ourairports-data/airports.csv"
+AIRPORT_CACHE_TTL = 24 * 3600
+AIRPORT_CACHE: dict[str, Any] = {"saved_at": 0.0, "by_icao": {}}
+AIRPORT_CACHE_LOCK = threading.RLock()
+
 
 
 app = FastAPI(
@@ -619,6 +629,7 @@ def health():
         "license": "CC-BY-4.0",
         "forecast_step_hours": 6,
         "forecast_coverage_hours": 48,
+        "airport_lookup": {"path": "/api/airports?ids=RKSI,KLAX", "cache_hours": 24},
         "aviation_weather_proxy": {
             "provider": "NOAA Aviation Weather Center",
             "products": ["/api/sigmets", "/api/pireps"],
@@ -725,6 +736,92 @@ def aviation_sigmets():
 def aviation_pireps():
     """Recent six-hour NOAA PIREP/AIREP reports as GeoJSON."""
     return _fetch_aviation_weather("pireps")
+
+
+
+def _load_airport_index() -> dict[str, dict]:
+    now = time.time()
+    with AIRPORT_CACHE_LOCK:
+        cached = AIRPORT_CACHE.get("by_icao") or {}
+        if cached and now - float(AIRPORT_CACHE.get("saved_at", 0.0)) < AIRPORT_CACHE_TTL:
+            return cached
+
+        try:
+            response = requests.get(
+                AIRPORT_DATA_URL,
+                headers={"User-Agent": "GTMS-Flight-Route/1.0", "Accept-Encoding": "gzip"},
+                timeout=(12, 90),
+            )
+            response.raise_for_status()
+            reader = csv.DictReader(io.StringIO(response.text.lstrip("\ufeff")))
+            priority = {"large_airport": 3, "medium_airport": 2, "small_airport": 1}
+            index: dict[str, dict] = {}
+            ranks: dict[str, int] = {}
+            for row in reader:
+                code = str(row.get("ident") or "").strip().upper()
+                kind = str(row.get("type") or "").strip().lower()
+                if len(code) != 4 or not code.isalnum() or kind not in priority:
+                    continue
+                try:
+                    lat = float(row.get("latitude_deg", ""))
+                    lon = float(row.get("longitude_deg", ""))
+                except (TypeError, ValueError):
+                    continue
+                if not (math.isfinite(lat) and math.isfinite(lon) and -90 <= lat <= 90 and -180 <= lon <= 180):
+                    continue
+                rank = priority[kind]
+                if rank < ranks.get(code, 0):
+                    continue
+                elevation = None
+                try:
+                    if row.get("elevation_ft") not in (None, ""):
+                        elevation = int(float(row["elevation_ft"]))
+                except (TypeError, ValueError):
+                    pass
+                index[code] = {
+                    "icao": code,
+                    "name": str(row.get("name") or code),
+                    "municipality": str(row.get("municipality") or ""),
+                    "country": str(row.get("iso_country") or ""),
+                    "type": kind,
+                    "lat": lat,
+                    "lon": lon,
+                    "elevation_ft": elevation,
+                }
+                ranks[code] = rank
+
+            if not index:
+                raise RuntimeError("공항 데이터에서 ICAO 좌표를 찾지 못했습니다.")
+            AIRPORT_CACHE["by_icao"] = index
+            AIRPORT_CACHE["saved_at"] = time.time()
+            logger.info("OurAirports ICAO index cached: airports=%s", len(index))
+            return index
+        except Exception as exc:
+            logger.exception("OurAirports airport catalogue download failed")
+            raise HTTPException(
+                status_code=502,
+                detail=f"공항 좌표 데이터 조회 실패: {type(exc).__name__}: {exc}",
+            ) from exc
+
+
+@app.get("/api/airports")
+def airport_lookup(ids: str):
+    codes = list(dict.fromkeys(
+        item.strip().upper() for item in ids.split(",")
+        if item.strip()
+    ))
+    if not codes or len(codes) > 10:
+        raise HTTPException(status_code=400, detail="ICAO 공항코드를 1~10개 입력하세요.")
+    if any(len(code) != 4 or not code.isalnum() for code in codes):
+        raise HTTPException(status_code=400, detail="공항코드는 4자리 영문·숫자 ICAO 형식이어야 합니다.")
+
+    index = _load_airport_index()
+    found = {code: index[code] for code in codes if code in index}
+    return {
+        "source": "OurAirports airports.csv (public-domain airport coordinates)",
+        "airports": found,
+        "missing": [code for code in codes if code not in found],
+    }
 
 
 @app.get("/api/aviation-weather/health")

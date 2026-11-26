@@ -26,14 +26,14 @@ jobs:
           ready=0
           for attempt in $(seq 1 60); do
             code="$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 20 "$BASE/health" || true)"
-            if [ "$code" = "200" ] && grep -q '"version":"1.0.10"' /tmp/health.json && grep -q '"release":"gtms-noaa-primary-20261126-aviation-proxy-r2"' /tmp/health.json; then
+            if [ "$code" = "200" ] && grep -q '"version":"1.0.11"' /tmp/health.json && grep -q '"release":"gtms-noaa-primary-20261126-flight-route-r1"' /tmp/health.json; then
               ready=1
               break
             fi
             sleep 10
           done
           if [ "$ready" != "1" ]; then
-            echo "GTMS weather gateway did not deploy the expected version 1.0.10"
+            echo "GTMS weather gateway did not deploy the expected version 1.0.11"
             cat /tmp/health.json 2>/dev/null || true
             exit 1
           fi
@@ -57,6 +57,29 @@ jobs:
           fi
           grep -qi '^access-control-allow-origin: https://gtms-static.onrender.com' /tmp/cors-headers.txt
           echo "PASS: browser POST preflight accepted for GTMS static site."
+
+
+      - name: Validate ICAO airport coordinate lookup
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://gtms-weather-api.onrender.com/api/airports?ids=RKSI,KLAX"
+          CODE="$(curl -sS -H 'Origin: https://gtms-static.onrender.com' -o /tmp/airports.json -w '%{http_code}' --max-time 90 "$URL" || true)"
+          if [ "$CODE" != "200" ]; then
+            cat /tmp/airports.json
+            echo "GTMS airport lookup returned HTTP $CODE"
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          data = json.load(open("/tmp/airports.json"))
+          airports = data.get("airports", {})
+          for code in ("RKSI", "KLAX"):
+              airport = airports[code]
+              assert -90 <= airport["lat"] <= 90
+              assert -180 <= airport["lon"] <= 180
+          print("PASS: ICAO airport lookup resolves RKSI and KLAX.")
+          PY
 
       - name: Validate NOAA SIGMET and PIREP proxy endpoints
         shell: bash
