@@ -1085,6 +1085,7 @@ $('plotRoute').onclick=async()=>{
   $('flightProgress').value='0';
   setFlightProgress(0);
   drawRoute(true);
+  toggleFlightAnimation();
   await assessRoute(false);
  }catch(e){
   $('flightPlanStatus').textContent=e.message;
@@ -1095,6 +1096,7 @@ $('clearRoute').onclick=()=>{
  stopFlightAnimation();
  currentRoute=[];flightSchedule=null;routeAssessments=[];routeForecastSnapshot=null;
  routeLayer.clearLayers();riskLayer.clearLayers();planeLayer.clearLayers();planeMarker=null;
+ if(cesiumViewer&&cesiumPlaneEntity){cesiumViewer.entities.remove(cesiumPlaneEntity);cesiumPlaneEntity=null}
  $('routeRows').innerHTML='<tr><td colspan="6">항공편 정보를 입력하고 항로 분석을 실행하세요.</td></tr>';
  $('flightPlanStatus').textContent='항로가 초기화되었습니다.';
  $('flightProgress').value='0';$('flightProgressLabel').textContent='0%';
@@ -1424,8 +1426,10 @@ $('aiTimelineSlider').oninput=()=>{
  $('aiForecastHour').value=$('aiTimelineSlider').value;
  syncAiTimeline();
 };
-$('aiTimelineSlider').onchange=()=>refreshAiGrid(true,!!aiGridSnapshot);
-$('aiForecastHour').onchange=()=>{syncAiTimeline();refreshAiGrid(true,!!aiGridSnapshot)};
+// Forecast lead changes must redraw risk/CAT/convective layers from cached data.
+// Only vertical pressure changes use the lightweight wind-only renderer.
+$('aiTimelineSlider').onchange=()=>refreshAiGrid(true,false);
+$('aiForecastHour').onchange=()=>{syncAiTimeline();refreshAiGrid(true,false)};
 $('horizon').onchange=()=>{
  const selected=Number($('aiForecastHour').value)||0;
  if(selected>Number($('horizon').value))$('aiForecastHour').value=String(Number($('horizon').value));
