@@ -534,25 +534,132 @@ async function fetchEcmwfGrid(model,points,horizon){
 }
 async function fetchEcmwfGridCached(model,points,horizon){
  const now=Date.now();
- const keyFor=p=>model+'|'+Number(p.lat).toFixed(2)+'|'+Number(p.lon).toFixed(2);
+ // All current GTMS forecasts are NOAA-first through one gateway, so use one
+ // client cache namespace for AIFS/IFS aliases to prevent duplicate downloads.
+ const sourceKey='ecmwf_aifs025_single';
+ const keyFor=p=>sourceKey+'|'+Number(p.lat).toFixed(2)+'|'+Number(p.lon).toFixed(2);
  const unique=new Map();
  points.forEach(p=>unique.set(keyFor(p),p));
  const missing=[];
  for(const [key,point] of unique){
   const cached=aiModelPointCache.get(key);
-  if(cached && now-cached.savedAt<AI_MODEL_CACHE_TTL)continue;
+  if(cached&&now-cached.savedAt<AI_MODEL_CACHE_TTL)continue;
   if(cached)aiModelPointCache.delete(key);
   missing.push({key,point});
  }
  if(missing.length){
-  const fresh=await fetchEcmwfGrid(model,missing.map(item=>item.point),horizon);
+  const fresh=await fetchEcmwfGrid('ecmwf_aifs025_single',missing.map(item=>item.point),horizon);
   fresh.forEach((row,index)=>aiModelPointCache.set(missing[index].key,{row,savedAt:Date.now()}));
   aiCacheStats.requests++;
   aiCacheStats.fetchedPoints+=missing.length;
  }
  aiCacheStats.reusedPoints+=unique.size-missing.length;
- return points.map(p=>aiModelPointCache.get(keyFor(p))?.row||null);
+ const rows=points.map(p=>aiModelPointCache.get(keyFor(p))?.row||null);
+ rows.forEach(row=>{if(row?.source)aiDataSources.add(String(row.source))});
+ return rows;
 }
+function aiGridRequestSignature(points){
+ return points.map(p=>Number(p.lat).toFixed(2)+','+Number(p.lon).toFixed(2)).join(';');
+}
+function summarizeAiGrid(points,targetLead,pressure){
+ const valid=points.filter(p=>p.mapCatIndex!=null||p.mapConvectiveIndex!=null||p.flowSpeed!=null);
+ const maxCat=Math.max(0,...valid.map(p=>p.mapCatIndex??0));
+ const maxConv=Math.max(0,...valid.map(p=>p.mapConvectiveIndex??0));
+ const modelLabel=Array.from(aiDataSources).join(' + ')||'GTMS 기상자료 서버';
+ const validTime=points.find(p=>p.flowTime)?.flowTime||'';
+ $('aiSummary').innerHTML=
+  '<span style="color:#86efac">● 기상 위험도 레이어 표출 완료</span><br>'+
+  '모델: '+esc(modelLabel)+' · 격자: '+valid.length+'/'+points.length+'<br>'+
+  '예보시각: '+(targetLead===0?'가장 가까운 예보':'+'+targetLead+'시간')+
+  ' · 바람장: '+pressure+' hPa<br>'+
+  '최고 CAT 지수: <b>'+maxCat+'/100 ('+aiRiskLabel(maxCat)+')</b><br>'+
+  '최고 대류성 지수: <b>'+maxConv+'/100 ('+aiRiskLabel(maxConv)+')</b><br>'+
+  '예보 유효시각: '+esc(validTime||'-')+' UTC · 화면 갱신: '+new Date().toISOString().slice(11,19)+' UTC<br>'+
+  '자료원: '+esc(modelLabel)+'<br>'+
+  'API 요청 '+aiCacheStats.requests+'회 · 신규 격자 '+aiCacheStats.fetchedPoints+'개 · 캐시 재사용 '+aiCacheStats.reusedPoints+'개';
+ $('lastUpdate').textContent='AI 예보 유효: '+(validTime||'--')+' UTC';
+}
+function evaluateAiGridRows(rows,meta,horizon,pressure,targetLead,pressureOnly=false){
+ const next=rows.map((row,index)=>{
+  const point=meta.points[index];
+  const result=evaluateModelPoint(row,horizon,targetLead,pressure);
+  const selected=result?.selected,flow=selected?.flow;
+  if(pressureOnly&&aiGridResults[index]){
+   return {
+    ...aiGridResults[index],
+    flowU:flow?.u??null,flowV:flow?.v??null,
+    flowSpeed:flow?.speed??null,heightM:flow?.heightM??null,
+    flowTime:flow?.time||selected?.time||''
+   };
+  }
+  const catIndex=selected?.catIndex??null;
+  const convectiveIndex=selected?.convectiveIndex??null;
+  const catBest=result?.cat,convBest=result?.convective;
+  return {
+   point,catIndex,convectiveIndex,mapCatIndex:catIndex,mapConvectiveIndex:convectiveIndex,
+   combinedIndex:catIndex==null?convectiveIndex:convectiveIndex==null?catIndex:Math.max(catIndex,convectiveIndex),
+   catTime:catBest?.time,convTime:convBest?.time,
+   shearMsKm:selected?.shearMsKm??catBest?.shearMsKm,
+   richardson:selected?.richardson??catBest?.richardson,
+   cape:selected?.cape??convBest?.cape,
+   precipitation:selected?.precipitation??convBest?.precipitation,
+   omega:selected?.omega??convBest?.omega,
+   flowU:flow?.u??null,flowV:flow?.v??null,flowSpeed:flow?.speed??null,
+   heightM:flow?.heightM??null,flowTime:flow?.time||selected?.time||'',
+   aifsCat:catBest?.index??null,ifsCat:null
+  };
+ });
+ aiGridResults=next;
+ if(pressureOnly){
+  // Vertical wind selection changes only the wind overlay, not CAT or convective risks.
+  aiWindCanvasLayer.setData(aiGridResults,meta);
+  setCanvasLayerVisibility();
+ }else{
+  drawAiLayers(aiGridResults,meta);
+  renderAiCesiumLayers();
+ }
+ summarizeAiGrid(aiGridResults,targetLead,pressure);
+}
+async function refreshAiGrid(force=false,pressureOnly=false){
+ if(aiBusy)return;
+ const now=Date.now();
+ if(!force&&now-aiLastRefreshAt<60000)return;
+ aiBusy=true;aiLastRefreshAt=now;
+ const button=$('aiRefreshBtn');
+ if(button)button.disabled=true;
+ $('aiSummary').textContent=pressureOnly?
+  '캐시된 상층 바람자료에서 선택 고도를 다시 표시하는 중…':
+  '현재 화면의 예보격자와 선택 고도 바람장을 불러오는 중…';
+ try{
+  const meta=buildAiGrid(),points=meta.points,horizon=Number($('horizon').value)||24;
+  const targetLead=Math.min(Number($('aiForecastHour').value)||0,horizon);
+  const pressure=Number($('windPressure').value)||250;
+  const signature=aiGridRequestSignature(points);
+  aiCacheStats={requests:0,fetchedPoints:0,reusedPoints:0};
+  aiDataSources=new Set();
+  const snapshot=aiGridSnapshot;
+  const reusable=snapshot&&snapshot.signature===signature&&snapshot.horizon>=horizon&&
+   now-snapshot.savedAt<AI_MODEL_CACHE_TTL&&snapshot.rows?.length===points.length;
+  let rows;
+  if(reusable){
+   rows=snapshot.rows;
+   aiCacheStats.reusedPoints=points.length;
+   rows.forEach(row=>{if(row?.source)aiDataSources.add(String(row.source))});
+  }else{
+   rows=await fetchEcmwfGridCached('ecmwf_aifs025_single',points,horizon);
+   aiGridSnapshot={signature,rows,meta,horizon,savedAt:Date.now()};
+  }
+  const fastPressureOnly=pressureOnly&&reusable&&aiGridResults.length===points.length;
+  evaluateAiGridRows(rows,meta,horizon,pressure,targetLead,fastPressureOnly);
+ }catch(error){
+  $('aiSummary').innerHTML='<span style="color:#fca5a5">● GTMS 예보자료 수신 실패: '+esc(error.message)+'</span><br>'+
+   '자료 요청 영역, 연결 상태 및 API 응답을 확인해야 합니다.';
+ }finally{
+  aiBusy=false;
+  if(button)button.disabled=false;
+ }
+}
+
 function aiPalette(value){
  const v=Math.max(0,Math.min(100,Number(value)||0));
  const stops=[
@@ -567,78 +674,99 @@ function aiPalette(value){
  const t=(v-a[0])/Math.max(1,b[0]-a[0]);
  return a[1].map((c,i)=>Math.round(c+(b[1][i]-c)*t));
 }
-async function refreshAiGrid(force=false){
+function aiGridRequestSignature(points){
+ return points.map(p=>Number(p.lat).toFixed(2)+','+Number(p.lon).toFixed(2)).join(';');
+}
+function summarizeAiGrid(points,targetLead,pressure){
+ const valid=points.filter(p=>p.mapCatIndex!=null||p.mapConvectiveIndex!=null||p.flowSpeed!=null);
+ const maxCat=Math.max(0,...valid.map(p=>p.mapCatIndex??0));
+ const maxConv=Math.max(0,...valid.map(p=>p.mapConvectiveIndex??0));
+ const modelLabel=Array.from(aiDataSources).join(' + ')||'GTMS 기상자료 서버';
+ const validTime=points.find(p=>p.flowTime)?.flowTime||'';
+ $('aiSummary').innerHTML=
+  '<span style="color:#86efac">● 기상 위험도 레이어 표출 완료</span><br>'+
+  '모델: '+esc(modelLabel)+' · 격자: '+valid.length+'/'+points.length+'<br>'+
+  '예보시각: '+(targetLead===0?'가장 가까운 예보':'+'+targetLead+'시간')+
+  ' · 바람장: '+pressure+' hPa<br>'+
+  '최고 CAT 지수: <b>'+maxCat+'/100 ('+aiRiskLabel(maxCat)+')</b><br>'+
+  '최고 대류성 지수: <b>'+maxConv+'/100 ('+aiRiskLabel(maxConv)+')</b><br>'+
+  '예보 유효시각: '+esc(validTime||'-')+' UTC · 화면 갱신: '+new Date().toISOString().slice(11,19)+' UTC<br>'+
+  '자료원: '+esc(modelLabel)+'<br>'+
+  'API 요청 '+aiCacheStats.requests+'회 · 신규 격자 '+aiCacheStats.fetchedPoints+'개 · 캐시 재사용 '+aiCacheStats.reusedPoints+'개';
+ $('lastUpdate').textContent='AI 예보 유효: '+(validTime||'--')+' UTC';
+}
+function evaluateAiGridRows(rows,meta,horizon,pressure,targetLead,pressureOnly=false){
+ const next=rows.map((row,index)=>{
+  const point=meta.points[index];
+  const result=evaluateModelPoint(row,horizon,targetLead,pressure);
+  const selected=result?.selected,flow=selected?.flow;
+  if(pressureOnly&&aiGridResults[index]){
+   return {
+    ...aiGridResults[index],
+    flowU:flow?.u??null,flowV:flow?.v??null,
+    flowSpeed:flow?.speed??null,heightM:flow?.heightM??null,
+    flowTime:flow?.time||selected?.time||''
+   };
+  }
+  const catIndex=selected?.catIndex??null;
+  const convectiveIndex=selected?.convectiveIndex??null;
+  const catBest=result?.cat,convBest=result?.convective;
+  return {
+   point,catIndex,convectiveIndex,mapCatIndex:catIndex,mapConvectiveIndex:convectiveIndex,
+   combinedIndex:catIndex==null?convectiveIndex:convectiveIndex==null?catIndex:Math.max(catIndex,convectiveIndex),
+   catTime:catBest?.time,convTime:convBest?.time,
+   shearMsKm:selected?.shearMsKm??catBest?.shearMsKm,
+   richardson:selected?.richardson??catBest?.richardson,
+   cape:selected?.cape??convBest?.cape,
+   precipitation:selected?.precipitation??convBest?.precipitation,
+   omega:selected?.omega??convBest?.omega,
+   flowU:flow?.u??null,flowV:flow?.v??null,flowSpeed:flow?.speed??null,
+   heightM:flow?.heightM??null,flowTime:flow?.time||selected?.time||'',
+   aifsCat:catBest?.index??null,ifsCat:null
+  };
+ });
+ aiGridResults=next;
+ if(pressureOnly){
+  // Vertical wind selection changes only the wind overlay, not CAT or convective risks.
+  aiWindCanvasLayer.setData(aiGridResults,meta);
+  setCanvasLayerVisibility();
+ }else{
+  drawAiLayers(aiGridResults,meta);
+  renderAiCesiumLayers();
+ }
+ summarizeAiGrid(aiGridResults,targetLead,pressure);
+}
+async function refreshAiGrid(force=false,pressureOnly=false){
  if(aiBusy)return;
  const now=Date.now();
- if(!force && now-aiLastRefreshAt<60000)return;
+ if(!force&&now-aiLastRefreshAt<60000)return;
  aiBusy=true;aiLastRefreshAt=now;
  const button=$('aiRefreshBtn');
  if(button)button.disabled=true;
- $('aiSummary').textContent='현재 화면의 예보격자와 선택 고도 바람장을 불러오는 중…';
+ $('aiSummary').textContent=pressureOnly?
+  '캐시된 상층 바람자료에서 선택 고도를 다시 표시하는 중…':
+  '현재 화면의 예보격자와 선택 고도 바람장을 불러오는 중…';
  try{
   const meta=buildAiGrid(),points=meta.points,horizon=Number($('horizon').value)||24;
-  const chosen=$('aiModel').value;
   const targetLead=Math.min(Number($('aiForecastHour').value)||0,horizon);
   const pressure=Number($('windPressure').value)||250;
+  const signature=aiGridRequestSignature(points);
   aiCacheStats={requests:0,fetchedPoints:0,reusedPoints:0};
   aiDataSources=new Set();
-  let aifsRows=null,ifsRows=null,aifsError=null;
-  // NOAA GFS is the primary source; the gateway automatically uses ECMWF
-  // AIFS only if NOAA is unavailable. Do not fetch the same NOAA fields twice.
-  try{
-   aifsRows=await fetchEcmwfGridCached('ecmwf_aifs025_single',points,horizon);
-  }catch(e){aifsError=e}
-  if(!aifsRows)throw new Error('NOAA GFS 및 ECMWF 대체 기상자료 수신 실패: '+(aifsError?.message||'원인 미상'));
-
-  aiGridResults=points.map((point,index)=>{
-   const a=aifsRows?evaluateModelPoint(aifsRows[index],horizon,targetLead,pressure):null;
-   const b=ifsRows?evaluateModelPoint(ifsRows[index],horizon,targetLead,pressure):null;
-   const catIndex=blendModelRisk(a?.cat?.index??null,b?.cat?.index??null);
-   const convectiveIndex=blendModelRisk(a?.convective?.index??null,b?.convective?.index??null);
-   const catSource=(a?.cat&&b?.cat)?(a.cat.index>=b.cat.index?a.cat:b.cat):(a?.cat||b?.cat);
-   const convSource=(a?.convective&&b?.convective)?(a.convective.index>=b.convective.index?a.convective:b.convective):(a?.convective||b?.convective);
-   const selectedA=a?.selected,selectedB=b?.selected;
-   const mapCatIndex=blendModelRisk(selectedA?.catIndex??null,selectedB?.catIndex??null);
-   const mapConvectiveIndex=blendModelRisk(selectedA?.convectiveIndex??null,selectedB?.convectiveIndex??null);
-   const flowU=blendModelValue(selectedA?.flow?.u??null,selectedB?.flow?.u??null);
-   const flowV=blendModelValue(selectedA?.flow?.v??null,selectedB?.flow?.v??null);
-   const flowSpeed=(flowU==null||flowV==null)?null:Math.hypot(flowU,flowV);
-   const heightM=blendModelValue(selectedA?.flow?.heightM??null,selectedB?.flow?.heightM??null);
-   const selectedTime=selectedA?.time||selectedB?.time||'';
-   return {
-    point,catIndex,convectiveIndex,mapCatIndex,mapConvectiveIndex,
-    combinedIndex:mapCatIndex==null?mapConvectiveIndex:
-     mapConvectiveIndex==null?mapCatIndex:Math.max(mapCatIndex,mapConvectiveIndex),
-    catTime:catSource?.time,convTime:convSource?.time,
-    shearMsKm:selectedA?.shearMsKm??selectedB?.shearMsKm??catSource?.shearMsKm,
-    richardson:selectedA?.richardson??selectedB?.richardson??catSource?.richardson,
-    cape:selectedA?.cape??selectedB?.cape??convSource?.cape,
-    precipitation:selectedA?.precipitation??selectedB?.precipitation??convSource?.precipitation,
-    omega:selectedA?.omega??selectedB?.omega??convSource?.omega,
-    flowU,flowV,flowSpeed,heightM,flowTime:selectedTime,
-    aifsCat:a?.cat?.index??null,ifsCat:b?.cat?.index??null
-   };
-  });
-
-  drawAiLayers(aiGridResults,meta);
-  renderAiCesiumLayers();
-  const valid=aiGridResults.filter(p=>p.mapCatIndex!=null||p.mapConvectiveIndex!=null||p.flowSpeed!=null);
-  const maxCat=Math.max(0,...valid.map(p=>p.mapCatIndex??0));
-  const maxConv=Math.max(0,...valid.map(p=>p.mapConvectiveIndex??0));
-  const modelLabel=Array.from(aiDataSources).join(' + ')||'GTMS 기상자료 서버';
-  const validTime=aiGridResults.find(p=>p.flowTime)?.flowTime||'';
-  $('aiSummary').innerHTML=
-   '<span style="color:#86efac">● 기상 위험도 레이어 표출 완료</span><br>'+
-   '모델: '+esc(modelLabel)+' · 격자: '+valid.length+'/'+points.length+'<br>'+
-   '예보시각: '+(targetLead===0?'가장 가까운 예보':'+'+targetLead+'시간')+
-   ' · 바람장: '+pressure+' hPa<br>'+
-   '최고 CAT 지수: <b>'+maxCat+'/100 ('+aiRiskLabel(maxCat)+')</b><br>'+
-   '최고 대류성 지수: <b>'+maxConv+'/100 ('+aiRiskLabel(maxConv)+')</b><br>'+
-   '예보 유효시각: '+esc(validTime||'-')+' UTC · 화면 갱신: '+new Date().toISOString().slice(11,19)+' UTC<br>'+
-   '자료원: '+esc(Array.from(aiDataSources).join(' + ')||'GTMS 기상자료 서버')+'<br>'+
-   'API 요청 '+aiCacheStats.requests+'회 · 신규 격자 '+aiCacheStats.fetchedPoints+'개 · 캐시 재사용 '+aiCacheStats.reusedPoints+'개'+
-   ((aifsError||ifsError)?'<br><span style="color:#fcd34d">일부 모델 조회 실패, 수신 가능한 모델 자료로 대체: '+esc((aifsError||ifsError).message)+'</span>':'');
-  $('lastUpdate').textContent='AI 예보 유효: '+(validTime||'--')+' UTC';
+  const snapshot=aiGridSnapshot;
+  const reusable=snapshot&&snapshot.signature===signature&&snapshot.horizon>=horizon&&
+   now-snapshot.savedAt<AI_MODEL_CACHE_TTL&&snapshot.rows?.length===points.length;
+  let rows;
+  if(reusable){
+   rows=snapshot.rows;
+   aiCacheStats.reusedPoints=points.length;
+   rows.forEach(row=>{if(row?.source)aiDataSources.add(String(row.source))});
+  }else{
+   rows=await fetchEcmwfGridCached('ecmwf_aifs025_single',points,horizon);
+   aiGridSnapshot={signature,rows,meta,horizon,savedAt:Date.now()};
+  }
+  const fastPressureOnly=pressureOnly&&reusable&&aiGridResults.length===points.length;
+  evaluateAiGridRows(rows,meta,horizon,pressure,targetLead,fastPressureOnly);
  }catch(error){
   $('aiSummary').innerHTML='<span style="color:#fca5a5">● GTMS 예보자료 수신 실패: '+esc(error.message)+'</span><br>'+
    '자료 요청 영역, 연결 상태 및 API 응답을 확인해야 합니다.';
