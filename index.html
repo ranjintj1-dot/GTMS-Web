@@ -749,13 +749,253 @@ function scheduleAiRefresh(){
  if(aiRefreshTimer)clearTimeout(aiRefreshTimer);
  aiRefreshTimer=setTimeout(()=>refreshAiGrid(false),2500);
 }
-function drawRoute(){
+const EARTH_RADIUS_KM=6371.0088;
+function wrapLongitude(lon){return ((Number(lon)+180)%360+360)%360-180}
+function haversineKm(a,b){
+ const rad=Math.PI/180,lat1=a.lat*rad,lat2=b.lat*rad,dLat=(b.lat-a.lat)*rad,dLon=wrapLongitude(b.lon-a.lon)*rad;
+ const h=Math.sin(dLat/2)**2+Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+ return 2*EARTH_RADIUS_KM*Math.asin(Math.sqrt(Math.max(0,Math.min(1,h))));
+}
+function greatCirclePoint(a,b,t){
+ const rad=Math.PI/180,deg=180/Math.PI;
+ const lat1=a.lat*rad,lon1=a.lon*rad,lat2=b.lat*rad,lon2=b.lon*rad;
+ const delta=2*Math.asin(Math.sqrt(
+  Math.sin((lat2-lat1)/2)**2+Math.cos(lat1)*Math.cos(lat2)*Math.sin((lon2-lon1)/2)**2
+ ));
+ if(delta<1e-8)return {lat:a.lat,lon:wrapLongitude(a.lon)};
+ const sinDelta=Math.sin(delta);
+ const A=Math.sin((1-t)*delta)/sinDelta,B=Math.sin(t*delta)/sinDelta;
+ const x=A*Math.cos(lat1)*Math.cos(lon1)+B*Math.cos(lat2)*Math.cos(lon2);
+ const y=A*Math.cos(lat1)*Math.sin(lon1)+B*Math.cos(lat2)*Math.sin(lon2);
+ const z=A*Math.sin(lat1)+B*Math.sin(lat2);
+ return {lat:Math.atan2(z,Math.hypot(x,y))*deg,lon:wrapLongitude(Math.atan2(y,x)*deg)};
+}
+function routeHeading(a,b){
+ const rad=Math.PI/180,deg=180/Math.PI,lat1=a.lat*rad,lat2=b.lat*rad,dLon=wrapLongitude(b.lon-a.lon)*rad;
+ const y=Math.sin(dLon)*Math.cos(lat2);
+ const x=Math.cos(lat1)*Math.sin(lat2)-Math.sin(lat1)*Math.cos(lat2)*Math.cos(dLon);
+ return (Math.atan2(y,x)*deg+360)%360;
+}
+function normaliseRouteDisplay(route){
+ let previous=null;
+ return route.map(p=>{
+  const lon=wrapLongitude(p.lon);
+  let displayLon=lon;
+  if(previous!==null){
+   while(displayLon-previous>180)displayLon-=360;
+   while(displayLon-previous< -180)displayLon+=360;
+  }
+  previous=displayLon;
+  return {...p,lon,displayLon,alt_ft:Number(p.alt_ft)||Number($('flightLevel').value)||35000};
+ });
+}
+function createGreatCircleRoute(start,end,count=41){
+ const points=[];
+ for(let i=0;i<count;i++){
+  const p=greatCirclePoint(start,end,i/(count-1));
+  points.push({...p,alt_ft:Number($('flightLevel').value)||35000});
+ }
+ points[0].airportCode=$('origin').value.trim().toUpperCase();
+ points[0].airportName=start.name;
+ points[points.length-1].airportCode=$('destination').value.trim().toUpperCase();
+ points[points.length-1].airportName=end.name;
+ return normaliseRouteDisplay(points);
+}
+async function getAirportPair(){
+ const origin=$('origin').value.trim().toUpperCase(),destination=$('destination').value.trim().toUpperCase();
+ if(!/^[A-Z0-9]{4}$/.test(origin)||!/^[A-Z0-9]{4}$/.test(destination))throw Error('출발지와 도착지는 4자리 ICAO 공항코드로 입력하세요.');
+ const data=await getJSON(GTMS_WEATHER_API_URL+'/api/airports?ids='+encodeURIComponent(origin+','+destination));
+ const airports=data.airports||{},missing=data.missing||[];
+ if(missing.length)throw Error('공항 좌표를 찾지 못했습니다: '+missing.join(', ')+' · 좌표가 있는 KML/GPX/Excel 항로를 불러오거나 ICAO 코드를 확인하세요.');
+ return {origin:airports[origin],destination:airports[destination],source:data.source};
+}
+function parseUtcInput(value){
+ if(!value)return null;
+ const text=String(value).trim();
+ const hasZone=/(Z|[+-]\d{2}:?\d{2})$/i.test(text);
+ const ms=Date.parse(hasZone?text:text+'Z');
+ return Number.isFinite(ms)?ms:null;
+}
+function utcInputValue(date){return (date||new Date()).toISOString().slice(0,16)}
+function routeCumulativeDistances(route){
+ const distances=[0];
+ for(let i=1;i<route.length;i++)distances.push(distances[i-1]+haversineKm(route[i-1],route[i]));
+ return distances;
+}
+function buildFlightSchedule(route){
+ const distances=routeCumulativeDistances(route);
+ const totalDistance=distances[distances.length-1];
+ if(totalDistance<1)throw Error('항로 거리가 너무 짧습니다. 출발·도착 좌표를 확인하세요.');
+ const rawTimes=route.map(p=>parseUtcInput(p.time));
+ const hasRecordedTimes=rawTimes.length>=2&&rawTimes.every(Number.isFinite)&&rawTimes.every((v,i)=>i===0||v>=rawTimes[i-1]);
+ let departureMs=hasRecordedTimes?rawTimes[0]:parseUtcInput($('departTime').value);
+ if(!Number.isFinite(departureMs)){
+  departureMs=Date.now();
+  $('departTime').value=utcInputValue(new Date(departureMs));
+ }
+ let arrivalMs=hasRecordedTimes?rawTimes[rawTimes.length-1]:parseUtcInput($('arriveTime').value);
+ let estimatedArrival=false;
+ if(!Number.isFinite(arrivalMs)){
+  const groundspeed=Math.max(300,Math.min(1200,Number($('groundSpeed').value)||850));
+  arrivalMs=departureMs+(totalDistance/groundspeed)*3600000;
+  estimatedArrival=true;
+  $('arriveTime').value=utcInputValue(new Date(arrivalMs));
+ }
+ if(arrivalMs<=departureMs)throw Error('예정 도착시각은 출발시각보다 늦어야 합니다.');
+ const durationHours=(arrivalMs-departureMs)/3600000;
+ if(durationHours>48)throw Error('현재 예보자료는 최대 48시간 범위입니다. 48시간 이내 비행편을 입력하세요.');
+ const timedRoute=route.map((p,i)=>({
+  ...p,cumulativeKm:distances[i],routeFraction:distances[i]/totalDistance,
+  etaMs:hasRecordedTimes?rawTimes[i]:departureMs+durationHours*(distances[i]/totalDistance)
+ }));
+ currentRoute=timedRoute;
+ flightSchedule={
+  points:timedRoute,departureMs,arrivalMs,totalDistanceKm:totalDistance,
+  durationHours,estimatedArrival,usesRecordedTimes:hasRecordedTimes
+ };
+ return flightSchedule;
+}
+function interpolateRouteAtDistance(distanceKm){
+ const schedule=flightSchedule?.points;
+ if(!schedule||schedule.length<2)return null;
+ const total=flightSchedule.totalDistanceKm,target=Math.max(0,Math.min(total,distanceKm));
+ let i=0;
+ while(i<schedule.length-2&&schedule[i+1].cumulativeKm<target)i++;
+ const a=schedule[i],b=schedule[i+1];
+ const segment=Math.max(0.001,b.cumulativeKm-a.cumulativeKm);
+ const t=Math.max(0,Math.min(1,(target-a.cumulativeKm)/segment));
+ const geo=greatCirclePoint(a,b,t);
+ let displayLon=geo.lon,reference=a.displayLon??a.lon;
+ while(displayLon-reference>180)displayLon-=360;
+ while(displayLon-reference< -180)displayLon+=360;
+ return {
+  ...geo,displayLon,
+  alt_ft:(Number(a.alt_ft)||35000)+((Number(b.alt_ft)||35000)-(Number(a.alt_ft)||35000))*t,
+  etaMs:a.etaMs+(b.etaMs-a.etaMs)*t,
+  heading:routeHeading(a,b),routeFraction:target/total
+ };
+}
+function getPlaneSvg(){
+ return '<svg viewBox="0 0 64 64" aria-hidden="true"><path d="M31 3c-2.4 0-4.2 2-4.2 4.5v17L7 36.2v5.5l19.8-5.3v12.1l-7.3 5.6v4.4L32 55.4l12.5 3.1v-4.4l-7.3-5.6V36.4L57 41.7v-5.5L37.8 24.5v-17C37.8 5 35.5 3 33 3z" fill="#38bdf8" stroke="#e8f3fb" stroke-width="2" stroke-linejoin="round"/></svg>';
+}
+function createPlaneLeafletIcon(heading){
+ return L.divIcon({
+  className:'gtms-plane-marker-shell',
+  html:'<div class="gtms-plane-icon" style="transform:rotate('+Number(heading||0)+'deg)">'+getPlaneSvg()+'</div>',
+  iconSize:[36,36],iconAnchor:[18,18]
+ });
+}
+function updatePlanePosition(progress){
+ if(!flightSchedule||currentRoute.length<2)return;
+ const pos=interpolateRouteAtDistance(flightSchedule.totalDistanceKm*clamp01(progress));
+ if(!pos)return;
+ if(!planeMarker){
+  planeMarker=L.marker([pos.lat,pos.displayLon],{
+   icon:createPlaneLeafletIcon(pos.heading),title:$('flightNo').value||'항공기',zIndexOffset:1800
+  }).addTo(planeLayer);
+ }else{
+  planeMarker.setLatLng([pos.lat,pos.displayLon]);
+  planeMarker.setIcon(createPlaneLeafletIcon(pos.heading));
+ }
+ const etaText=new Date(pos.etaMs).toISOString().replace('T',' ').slice(0,16)+' UTC';
+ planeMarker.bindPopup('<b>'+esc($('flightNo').value||'항공편')+'</b><br>'+
+  esc($('origin').value)+' → '+esc($('destination').value)+'<br>'+
+  '예정 통과시각: '+etaText+'<br>고도: '+Math.round(pos.alt_ft)+' ft MSL');
+ if(cesiumViewer){
+  const cartesian=Cesium.Cartesian3.fromDegrees(pos.lon,pos.lat,Math.max(0,pos.alt_ft)*0.3048);
+  if(!cesiumPlaneEntity){
+   const svg=encodeURIComponent(getPlaneSvg());
+   cesiumPlaneEntity=cesiumViewer.entities.add({
+    position:cartesian,
+    billboard:{image:'data:image/svg+xml;charset=utf-8,'+svg,width:38,height:38,rotation:-(pos.heading*Math.PI/180),alignedAxis:Cesium.Cartesian3.ZERO},
+    name:$('flightNo').value||'GTMS aircraft'
+   });
+  }else{
+   cesiumPlaneEntity.position=cartesian;
+   cesiumPlaneEntity.billboard.rotation=-(pos.heading*Math.PI/180);
+  }
+ }
+}
+function setFlightProgress(value){
+ const progress=Math.max(0,Math.min(100,Number(value)||0));
+ $('flightProgress').value=String(Math.round(progress));
+ $('flightProgressLabel').textContent=Math.round(progress)+'%';
+ updatePlanePosition(progress/100);
+}
+function stopFlightAnimation(){
+ flightIsPlaying=false;
+ if(flightAnimationFrame!==null)cancelAnimationFrame(flightAnimationFrame);
+ flightAnimationFrame=null;
+ $('flightPlay').textContent='▶ 항로 시뮬레이션';
+}
+function flightAnimationTick(now){
+ if(!flightIsPlaying)return;
+ const progress=Math.min(1,(now-flightAnimationStart)/flightAnimationDurationMs);
+ setFlightProgress(progress*100);
+ if(progress>=1){stopFlightAnimation();return}
+ flightAnimationFrame=requestAnimationFrame(flightAnimationTick);
+}
+function toggleFlightAnimation(){
+ if(!flightSchedule)return;
+ if(flightIsPlaying){stopFlightAnimation();return}
+ let current=Number($('flightProgress').value)||0;
+ if(current>=100){current=0;setFlightProgress(0)}
+ flightIsPlaying=true;
+ flightAnimationStart=performance.now()-(current/100)*flightAnimationDurationMs;
+ $('flightPlay').textContent='Ⅱ 일시정지';
+ flightAnimationFrame=requestAnimationFrame(flightAnimationTick);
+}
+function drawRoute(fitBounds=true){
  routeLayer.clearLayers();if(currentRoute.length<2)return;
- const ll=currentRoute.map(p=>[p.lat,p.lon]);
- L.polyline(ll,{color:'#e8f3fb',weight:2,opacity:.9,dashArray:'6 7'}).addTo(routeLayer);
- currentRoute.forEach((p,i)=>L.circleMarker([p.lat,p.lon],{radius:i===0||i===currentRoute.length-1?6:3,color:'#ffffff',fillColor:'#087ca4',fillOpacity:1,weight:1}).bindPopup(`<b>${i===0?'DEP':i===currentRoute.length-1?'DEST':'WP '+i}</b><br>${p.lat.toFixed(4)}, ${p.lon.toFixed(4)}<br>고도: ${p.alt_ft??$('flightLevel').value} ft MSL`).addTo(routeLayer));
- if($('showRoute').checked){if(!map.hasLayer(routeLayer))routeLayer.addTo(map)}else if(map.hasLayer(routeLayer)){map.removeLayer(routeLayer)}
- map.fitBounds(ll,{padding:[35,35]});
+ const ll=currentRoute.map(p=>[p.lat,p.displayLon??p.lon]);
+ L.polyline(ll,{color:'#e8f3fb',weight:2,opacity:.95,dashArray:'6 7'}).addTo(routeLayer);
+ currentRoute.forEach((p,i)=>{
+  const code=p.airportCode||(i===0?$('origin').value:i===currentRoute.length-1?$('destination').value:'');
+  const title=p.airportName||(i===0?'출발':i===currentRoute.length-1?'도착':'WP '+i);
+  if(i===0||i===currentRoute.length-1||currentRoute.length<18){
+   L.circleMarker([p.lat,p.displayLon??p.lon],{radius:i===0||i===currentRoute.length-1?6:3,color:'#ffffff',fillColor:'#087ca4',fillOpacity:1,weight:1})
+    .bindPopup('<b>'+esc(title)+(code?' ('+esc(code)+')':'')+'</b><br>'+p.lat.toFixed(4)+', '+wrapLongitude(p.lon).toFixed(4)+'<br>고도: '+Math.round(p.alt_ft||$('flightLevel').value)+' ft MSL')
+    .addTo(routeLayer);
+  }
+ });
+ if($('showRoute').checked){if(!map.hasLayer(routeLayer))routeLayer.addTo(map)}
+ else if(map.hasLayer(routeLayer)){map.removeLayer(routeLayer)}
+ if(fitBounds)map.fitBounds(ll,{padding:[35,35]});
+ if(flightSchedule&&$('showRoute').checked){
+  if(!map.hasLayer(planeLayer))planeLayer.addTo(map);
+  setFlightProgress(Number($('flightProgress')?.value)||0);
+ }
+}
+function updateFlightPlanStatus(){
+ if(!flightSchedule)return;
+ const start=new Date(flightSchedule.departureMs).toISOString().slice(0,16).replace('T',' ');
+ const end=new Date(flightSchedule.arrivalMs).toISOString().slice(0,16).replace('T',' ');
+ $('flightPlanStatus').innerHTML=
+  '<b>'+esc($('flightNo').value||'항공편')+'</b> · '+esc($('origin').value.toUpperCase())+' → '+esc($('destination').value.toUpperCase())+'<br>'+
+  '거리 '+Math.round(flightSchedule.totalDistanceKm).toLocaleString()+' km · 비행 '+flightSchedule.durationHours.toFixed(1)+' h<br>'+
+  'STD '+start+' UTC → STA '+end+' UTC · '+(flightSchedule.usesRecordedTimes?'항적 타임스탬프 적용':flightSchedule.estimatedArrival?'지상속도 기반 예상 도착':'STD/STA 입력시각 적용')+'<br>'+
+  '<span style="color:#fcd34d">비행기 아이콘은 90초 항로 시뮬레이션입니다. 실시간 ADS-B 위치가 아닙니다.</span>';
+}
+function buildTimedWeatherSamples(maxPoints=32){
+ if(!flightSchedule||currentRoute.length<2)return [];
+ const count=Math.min(maxPoints,Math.max(12,Math.min(32,currentRoute.length)));
+ const samples=[];
+ for(let i=0;i<count;i++){
+  const fraction=i/(count-1),position=interpolateRouteAtDistance(flightSchedule.totalDistanceKm*fraction);
+  if(position)samples.push({
+   lat:Number(position.lat.toFixed(4)),lon:Number(wrapLongitude(position.lon).toFixed(4)),
+   displayLon:position.displayLon,alt_ft:position.alt_ft,
+   routeFraction:fraction,etaMs:position.etaMs,heading:position.heading
+  });
+ }
+ return samples;
+}
+async function lookupAndGenerateAirportRoute(){
+ const pair=await getAirportPair();
+ currentRoute=createGreatCircleRoute(pair.origin,pair.destination,41);
+ $('coords').value='';
+ $('flightPlanStatus').textContent='OurAirports 좌표로 출발·도착 공항 간 대권 기준 경로를 생성했습니다. 실제 OFP 경로와 다를 수 있습니다.';
+ return pair;
 }
 function parseCoords(){return $('coords').value.split(/\n|;/).map(s=>s.trim()).filter(Boolean).map(s=>{const a=s.split(/[,\s]+/).map(Number);if(a.length<2||!Number.isFinite(a[0])||!Number.isFinite(a[1])||Math.abs(a[0])>90||Math.abs(a[1])>180)throw Error('좌표 형식 오류: '+s);return {lat:a[0],lon:a[1],alt_ft:Number($('flightLevel').value)||35000}})}
 function parseKML(text){
