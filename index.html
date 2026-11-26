@@ -892,14 +892,21 @@ function updatePlanePosition(progress){
   planeMarker=L.marker([pos.lat,pos.displayLon],{
    icon:createPlaneLeafletIcon(pos.heading),title:$('flightNo').value||'항공기',zIndexOffset:1800
   }).addTo(planeLayer);
+  planeMarker.bindPopup('');
+  planeMarker.on('popupopen',()=>{
+   const current=planeMarker?._gtmsFlightPosition;
+   if(!current)return;
+   const etaText=new Date(current.etaMs).toISOString().replace('T',' ').slice(0,16)+' UTC';
+   planeMarker.setPopupContent('<b>'+esc($('flightNo').value||'항공편')+'</b><br>'+
+    esc($('origin').value)+' → '+esc($('destination').value)+'<br>'+
+    '예정 통과시각: '+etaText+'<br>고도: '+Math.round(current.alt_ft)+' ft MSL');
+  });
  }else{
   planeMarker.setLatLng([pos.lat,pos.displayLon]);
-  planeMarker.setIcon(createPlaneLeafletIcon(pos.heading));
+  const iconNode=planeMarker.getElement()?.querySelector('.gtms-plane-icon');
+  if(iconNode)iconNode.style.transform='rotate('+Number(pos.heading||0)+'deg)';
  }
- const etaText=new Date(pos.etaMs).toISOString().replace('T',' ').slice(0,16)+' UTC';
- planeMarker.bindPopup('<b>'+esc($('flightNo').value||'항공편')+'</b><br>'+
-  esc($('origin').value)+' → '+esc($('destination').value)+'<br>'+
-  '예정 통과시각: '+etaText+'<br>고도: '+Math.round(pos.alt_ft)+' ft MSL');
+ planeMarker._gtmsFlightPosition=pos;
  if(cesiumViewer){
   const cartesian=Cesium.Cartesian3.fromDegrees(pos.lon,pos.lat,Math.max(0,pos.alt_ft)*0.3048);
   if(!cesiumPlaneEntity){
