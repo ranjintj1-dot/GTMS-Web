@@ -39,6 +39,15 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
 .map-timeline .time-start,.map-timeline .time-end{font-size:10px;color:#a8c4d5;white-space:nowrap}
 .mapnote{bottom:76px}
 @media(max-width:900px){.layout{grid-template-columns:1fr}aside{max-height:none;border-right:0;border-bottom:1px solid var(--line)}.mapwrap{height:55vh;min-height:380px}.map-timeline{width:calc(100% - 24px);min-width:0;left:12px;transform:none;gap:8px;padding:8px 10px}.map-timeline .time-sub{display:none}.mapnote{bottom:66px}.below{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,1fr)}}
+.gtms-plane-marker-shell{background:transparent!important;border:0!important}
+.gtms-plane-icon{width:36px;height:36px;display:grid;place-items:center;filter:drop-shadow(0 2px 5px #001522);transform-origin:50% 50%}
+.gtms-plane-icon svg{width:34px;height:34px;overflow:visible}
+.flight-controls{display:flex;align-items:center;gap:7px;margin-top:8px;flex-wrap:wrap}
+.flight-controls button{font-size:12px}
+.flight-controls input[type=range]{flex:1;min-width:100px;padding:0;accent-color:#38bdf8}
+.flight-state{font-size:11px;color:#a8c4d5;line-height:1.5;margin-top:6px}
+.route-list{max-height:270px}
+.route-list table{min-width:760px}
 </style>
 </head>
 <body>
@@ -51,24 +60,27 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
  <section class="panel">
   <h2>FLIGHT / ROUTE INPUT</h2>
   <label>항공편 번호</label><input id="flightNo" value="TW123" placeholder="예: TW123">
-  <div class="row"><div><label>출발지 ICAO</label><input id="origin" value="RKSI" maxlength="4"></div><div><label>도착지 ICAO</label><input id="destination" value="KLAX" maxlength="4"></div></div>
+  <div class="row"><div><label>출발지 ICAO</label><input id="origin" value="RKSI" maxlength="4" placeholder="RKSI"></div><div><label>도착지 ICAO</label><input id="destination" value="KLAX" maxlength="4" placeholder="KLAX"></div></div>
   <div class="row"><div><label>순항고도 (ft MSL)</label><input id="flightLevel" type="number" value="35000" step="1000"></div><div><label>예정 출발 (UTC)</label><input id="departTime" type="datetime-local"></div></div>
+  <div class="row"><div><label>예정 도착 (UTC)</label><input id="arriveTime" type="datetime-local"></div><div><label>평균 지상속도 (km/h, 도착시각 미입력 시)</label><input id="groundSpeed" type="number" min="300" max="1200" step="10" value="850"></div></div>
+  <div class="hint">출발·도착 시각을 입력하면 항로 거리 비율로 각 지점의 UTC 통과시각을 계산합니다. 도착시각이 비어 있으면 평균 지상속도로 예상 도착시각을 계산합니다.</div>
   <label>항적 입력 방법</label>
   <div class="tabs"><button class="active" data-tab="manual">직접 입력</button><button data-tab="kml">KML</button><button data-tab="gpx">GPX</button><button data-tab="excel">Excel / CSV</button></div>
   <div id="manualPane">
    <label>경로 좌표 (위도,경도 / 한 줄에 한 지점)</label>
-   <textarea id="coords" rows="5" placeholder="37.4602,126.4407&#10;40.0,150.0&#10;35.0,180.0&#10;33.9416,-118.4085">37.4602,126.4407
-40.0,150.0
-42.0,175.0
-40.0,-165.0
-36.0,-145.0
-33.9416,-118.4085</textarea>
-   <div class="hint">기본 예시는 설명용 경로입니다. 실제 운항 항적이나 OFP 좌표로 교체하세요.</div>
+   <textarea id="coords" rows="4" placeholder="실제 OFP 경유지 좌표를 입력하세요.&#10;예: 37.4602,126.4407&#10;40.0,150.0&#10;35.0,180.0&#10;33.9416,-118.4085"></textarea>
+   <div class="hint">좌표를 비워 두면 출발·도착 ICAO 공항 좌표로 대권 기준 경로를 자동 생성합니다. 실제 OFP 경로는 KML·GPX·Excel로 불러오면 더 정확합니다.</div>
   </div>
   <div id="kmlPane" hidden><label>KML 항적 파일</label><input id="kmlFile" type="file" accept=".kml,.xml"><div class="hint">시간 정보가 있는 Point 항적을 우선 읽습니다. altitudeMode=absolute 고도는 MSL 값으로 보존합니다.</div></div>
   <div id="gpxPane" hidden><label>GPX 항적 파일</label><input id="gpxFile" type="file" accept=".gpx,application/gpx+xml,application/xml"><div class="hint">GPX Track(trkpt)을 우선 읽고, Track이 없으면 Route(rtept)를 읽습니다. 고도(ele)는 미터에서 ft로 변환하며, time 값은 항적 시각으로 보존합니다.</div></div>
   <div id="excelPane" hidden><label>Excel / CSV 파일</label><input id="excelFile" type="file" accept=".xlsx,.xls,.csv"><div class="hint">첫 번째 시트에서 latitude/longitude 또는 lat/lon 열을 읽습니다. 선택 항목: flight, altitude_ft, time.</div></div>
-  <div class="row" style="margin-top:10px"><button id="plotRoute" class="primary">항로 표시 및 분석</button><button id="clearRoute">초기화</button></div>
+  <div class="row" style="margin-top:10px"><button id="plotRoute" class="primary">항로 생성 및 기상 분석</button><button id="clearRoute">초기화</button></div>
+  <div class="flight-controls">
+   <button id="flightPlay">▶ 항로 시뮬레이션</button>
+   <input id="flightProgress" type="range" min="0" max="100" step="1" value="0" aria-label="항공기 항로 시뮬레이션 진행률">
+   <span id="flightProgressLabel">0%</span>
+  </div>
+  <div id="flightPlanStatus" class="flight-state">항공편 정보를 입력하고 항로 생성 및 기상 분석을 실행하세요.</div>
  </section>
  <section class="panel">
   <h2>WEATHER LAYERS</h2>
@@ -110,7 +122,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
  </section>
  <section class="panel">
   <h2>DATA SOURCES / STATUS</h2><div id="feedStatus">브라우저 외부 기상자료 연결 준비 중…</div>
-  <div class="hint">NOAA Aviation Weather API · Cloudflare Worker · ECMWF Open Data AWS · GTMS Weather Gateway · OpenStreetMap</div>
+  <div class="hint">NOAA Aviation Weather API · NOAA GFS BDP · ECMWF AIFS / IFS · OurAirports 공항좌표 · OpenStreetMap</div>
  </section>
 </aside>
 <main>
@@ -144,7 +156,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
     <div class="kpi"><small>PIREP 보고</small><strong id="kpiPirep">0</strong></div>
     <div class="kpi"><small>SIGMET</small><strong id="kpiSigmet">0</strong></div>
    </div>
-   <div class="route-list"><table><thead><tr><th>구간</th><th>위치</th><th>고도</th><th>위험지표</th><th>근거</th></tr></thead><tbody id="routeRows"><tr><td colspan="5">항로를 입력하고 분석을 실행하세요.</td></tr></tbody></table></div>
+   <div class="route-list"><table><thead><tr><th>지점</th><th>예정 통과시각 (UTC)</th><th>위치</th><th>고도</th><th>난기류 위험</th><th>바람 / 예보 유효시각</th></tr></thead><tbody id="routeRows"><tr><td colspan="6">항공편 정보를 입력하고 분석을 실행하세요.</td></tr></tbody></table></div>
   </section>
   <section class="card">
    <h2>LIVE AVIATION WEATHER FEEDS</h2>
@@ -158,8 +170,10 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px 6px;b
 <script>
 const NOAA_PROXY_BASE=String(window.GTMS_NOAA_PROXY_URL||'').replace(/\/+$/,'');
 const $=id=>document.getElementById(id);
-let map, routeLayer, riskLayer, sigmetLayer, pirepLayer, aiCatLayer, aiConvectiveLayer, aiCompositeCanvasLayer, aiCatCanvasLayer, aiConvectiveCanvasLayer, aiWindCanvasLayer, cesiumViewer, currentRoute=[], sigmets=[], pireps=[], routeAssessments=[];
+let map, routeLayer, riskLayer, sigmetLayer, pirepLayer, planeLayer, planeMarker=null, aiCatLayer, aiConvectiveLayer, aiCompositeCanvasLayer, aiCatCanvasLayer, aiConvectiveCanvasLayer, aiWindCanvasLayer, cesiumViewer, cesiumPlaneEntity=null, currentRoute=[], sigmets=[], pireps=[], routeAssessments=[];
+let flightSchedule=null, flightAnimationFrame=null, flightAnimationStart=0, flightAnimationDurationMs=90000, flightIsPlaying=false;
 let aiGridResults=[], aiGridMeta=null, aiRefreshTimer=null, aiLastRefreshAt=0, aiBusy=false, aiCesiumEntities=[];
+let aiGridSnapshot=null, routeForecastSnapshot=null;
 let aiModelPointCache=new Map(), aiModelQuotaBlocked=new Set();
 let aiDataSources=new Set();
 let aiCacheStats={requests:0,fetchedPoints:0,reusedPoints:0};
@@ -169,7 +183,7 @@ function utcClock(){ $('clock').textContent='UTC '+new Date().toISOString().slic
 setInterval(utcClock,1000);utcClock();
 map=L.map('map',{worldCopyJump:true}).setView([25,145],3);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'&copy; OpenStreetMap'}).addTo(map);
-routeLayer=L.layerGroup().addTo(map);riskLayer=L.layerGroup().addTo(map);sigmetLayer=L.layerGroup().addTo(map);pirepLayer=L.layerGroup().addTo(map);aiCatLayer=L.layerGroup().addTo(map);aiConvectiveLayer=L.layerGroup().addTo(map);
+routeLayer=L.layerGroup().addTo(map);riskLayer=L.layerGroup().addTo(map);sigmetLayer=L.layerGroup().addTo(map);pirepLayer=L.layerGroup().addTo(map);planeLayer=L.layerGroup().addTo(map);aiCatLayer=L.layerGroup().addTo(map);aiConvectiveLayer=L.layerGroup().addTo(map);
 map.createPane('aiHeatPane');map.getPane('aiHeatPane').style.zIndex=350;map.getPane('aiHeatPane').style.pointerEvents='none';
 aiCompositeCanvasLayer=createAiCanvasLayer('composite','aiHeatPane').addTo(map);
 aiCatCanvasLayer=createAiCanvasLayer('cat','aiHeatPane');
